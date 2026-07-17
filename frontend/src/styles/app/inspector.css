@@ -1,0 +1,172 @@
+/* ==========================================================================
+   EVIDENCE INSPECTOR
+   ========================================================================== */
+
+.inspector-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 5, 8, 0.65);
+  backdrop-filter: blur(2px);
+  z-index: 29;
+}
+
+/* Drag handle for mobile bottom sheet - hidden on desktop */
+.inspector-drag-handle {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .inspector-drag-handle {
+    display: flex;
+    justify-content: center;
+    padding: 10px 0 6px;
+    cursor: grab;
+    touch-action: none;
+  }
+
+  .inspector-drag-pill {
+    width: 36px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.25);
+    transition: background var(--duration-fast) var(--ease-out);
+  }
+
+  .inspector-drag-handle:active .inspector-drag-pill {
+    background: rgba(255, 255, 255, 0.45);
+  }
+}
+
+.inspector {
+  font-family: var(--font-ui);
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  height: 100dvh;
+  width: min(520px, 46vw);
+  background: var(--bg-elevated);
+  padding: var(--space-lg);
+  border-left: 1px solid var(--line-subtle);
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+  z-index: 30;
+  animation: slideIn var(--duration-normal) var(--ease-out);
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.inspector h3 {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.inspector-card {
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  background: var(--surface-2);
+  border: 1px solid var(--line-subtle);
+}
+
+/* Inspector Tabs */
+.inspector-tabs {
+  display: flex;
+  gap: 20px;
+  margin-bottom: var(--space-md);
+  border-bottom: 1px solid var(--line-subtle);
+  padding-bottom: 0;
+}
+
+.tab {
+  font-family: var(--font-ui);
+  border: none;
+  background: transparent;
+  padding: 8px 0;
+  border-bottom: 2px solid transparent; /* Indicator preparation */
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  border-radius: 0;
+}
+
+.tab:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: transparent;
+}
+
+/* Evidence Excerpt - Serif Typography */
+.evidence-excerpt {
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.75;
+  letter-spacing: 0.01em;
+  font-feature-settings: 'liga' 1, 'onum' 1;
+  color: var(--text-secondary);
+}
+
+.evidence-excerpt.highlighted {
+  background: var(--accent-glow);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm);
+  border-left: 3px solid var(--accent);
+  animation: highlightFade 2s var(--ease-out);
+}
+
+@keyframes highlightFade {
+  0% {
+    background: var(--accent-dim);
+  }
+  100% {
+    background: var(--accent-glow);
+  }
+}
+
+/* Chip - General Purpose */
+.chip {
+  font-family: var(--font-ui);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-subtle);
+  padding: 6px 12px;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.chip:hover {
+  border-color: var(--line-muted);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.chip.active {
+  border-color: var(--line-focus);
+  color: var(--accent);
+  background: var(--accent-glow);
+}

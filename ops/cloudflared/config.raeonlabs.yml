@@ -1,0 +1,11 @@
+# Copy this to ~/.cloudflared/config.yml after creating tunnel
+# and replacing <TUNNEL_UUID>
+tunnel: <TUNNEL_UUID>
+credentials-file: ~/.cloudflared/<TUNNEL_UUID>.json
+
+ingress:
+  - hostname: rag.raeonlabs.com
+    service: http://127.0.0.1:4173
+  - hostname: api.raeonlabs.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404

@@ -1,0 +1,353 @@
+/* ==========================================================================
+   INPUT BAR - Hero Element
+   ========================================================================== */
+
+.input-bar {
+  font-family: var(--font-ui);
+  position: sticky;
+  bottom: var(--space-lg);
+  width: min(820px, 100%);
+  margin: 0 auto;
+  display: block;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  transition: all var(--duration-normal) var(--ease-out);
+  z-index: 20;
+  min-height: 56px;
+}
+
+.input-bar-form {
+  display: block;
+}
+
+.input-bar-note {
+  font-family: var(--font-ui);
+  max-width: none;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.2;
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.62);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.input-shell-surface {
+  background: var(--surface-input-shell);
+}
+
+.input-dropdown-surface {
+  background: var(--surface-input-dropdown);
+}
+
+/* Corpus Select */
+.input-bar-shell {
+  display: flex;
+  align-items: center; /* Centered for single line */
+  gap: var(--space-md);
+  width: 100%;
+  background: rgba(30, 30, 30, 0.7); /* Translucent Apple style */
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: var(--radius-full);
+  padding: 8px 8px 8px 16px;
+  min-height: 60px;
+  backdrop-filter: blur(24px) saturate(180%); /* Strong iOS blur */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.03),
+    var(--shadow-md);
+  transition: 
+    border-radius var(--duration-normal) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-normal) var(--ease-out),
+    background var(--duration-normal) var(--ease-out);
+}
+
+/* Expanded state for multi-line text */
+.input-bar-shell.is-expanded {
+  border-radius: var(--radius-lg);
+  align-items: center; /* Keep everything vertically centered regardless of height */
+  padding: 12px 12px 12px 16px;
+  background: rgba(30, 30, 30, 0.9);
+  border-color: var(--line-muted);
+}
+
+.input-bar-shell.is-expanded .input-left {
+  align-self: center;
+  padding-bottom: 0;
+}
+
+.input-bar:focus-within .input-bar-shell {
+  border-color: rgba(255, 255, 255, 0.36);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
+    0 10px 26px rgba(0, 0, 0, 0.42),
+    0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.input-left {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.input-center {
+  display: flex;
+  flex: 1;
+  align-items: center;
+}
+
+.input-right {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.corpus-select {
+  border: 1px solid transparent;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 6px 14px;
+  padding-right: 28px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.corpus-select:hover {
+  background-color: var(--surface-3);
+  color: white;
+}
+
+.corpus-select:focus {
+  outline: none;
+  background-color: var(--surface-3);
+  border-color: rgba(255,255,255,0.2);
+}
+
+.input-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--line-subtle);
+  margin: 0 4px;
+}
+
+/* Input Textarea */
+.input-bar textarea {
+  font-family: var(--font-ui);
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  resize: none;
+  font-size: 16px; /* 16px prevents iOS auto-zoom on focus */
+  line-height: 1.45;
+  outline: none;
+  padding: 0;
+  margin: 0;
+  min-height: 24px;
+  max-height: 160px;
+  caret-color: var(--accent);
+  display: block;
+  overflow-y: hidden; /* Controlled by React logic */
+  scrollbar-width: none; /* Hide for Firefox by default */
+}
+
+/* Custom scrollbar for textarea when it overflows */
+.input-bar textarea::-webkit-scrollbar {
+  width: 4px;
+}
+
+.input-bar textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.input-bar textarea::-webkit-scrollbar-thumb {
+  background: var(--line-subtle);
+  border-radius: var(--radius-full);
+}
+
+.input-bar textarea::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.input-bar textarea::placeholder {
+  color: var(--text-subtle);
+}
+
+/* Send/Stop Button */
+.input-bar .input-send-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: white; /* Apple style - pure white button */
+  border: none;
+  color: black; /* Black icon for contrast */
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  flex-shrink: 0;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+
+.input-bar .input-send-btn:hover:not(:disabled) {
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(255, 255, 255, 0.3);
+}
+
+.input-bar .input-send-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.input-bar .input-send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.3);
+  box-shadow: none;
+}
+
+/* ==========================================================================
+   JUMP TO LATEST BUTTON
+   ========================================================================== */
+
+.jump-latest {
+  position: absolute;
+  right: max(12px, calc((100% - min(860px, 100%)) / 2 - 56px));
+  bottom: clamp(96px, 12vh, 180px);
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--line-muted);
+  background: var(--surface-1);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 14px;
+  z-index: 15;
+  box-shadow: var(--shadow-md);
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.jump-latest:hover {
+  border-color: var(--line-focus);
+  color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+.jump-latest-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: dotPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.85); }
+}
+
+.copy-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 90px);
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 10px 14px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--line-subtle);
+  background: rgba(17, 22, 28, 0.94);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: var(--shadow-lg);
+}
+
+.copy-toast-success {
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.copy-toast-error {
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.rename-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(3, 5, 8, 0.7);
+  backdrop-filter: blur(2px);
+}
+
+.rename-dialog-panel {
+  font-family: var(--font-ui);
+  width: min(94vw, 420px);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-subtle);
+  background: #0f1115;
+  padding: 20px;
+  box-shadow: var(--shadow-lg);
+}
+
+.rename-dialog-title {
+  font-family: var(--font-ui);
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.rename-dialog-form {
+  display: grid;
+  gap: 12px;
+}
+
+.rename-dialog-input {
+  font-family: var(--font-ui);
+  width: 100%;
+  border: 1px solid var(--line-muted);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.4;
+  padding: 10px 12px;
+}
+
+.rename-dialog-input:focus {
+  outline: none;
+  border-color: var(--line-focus);
+}
+
+.rename-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
