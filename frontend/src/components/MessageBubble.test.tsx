@@ -238,4 +238,19 @@ describe('MessageBubble', () => {
     }
     expect(screen.queryByLabelText('Unresolved citation')).toBeNull()
   })
+
+  it('renders fullwidth-bracket citations as chips', () => {
+    const id = '3f052b2b-6e8c-4477-9b0d-4237fc0dfcb0'
+    const { container } = render(
+      <MessageBubble
+        message={buildAssistantMessage({
+          content: `A claim【chunk:${id}】 and a bare one【${id}】.`,
+          evidence: [{ evidence_id: id, parent_id: 'p1', label: 'Source 1', path: 'path-1', is_primary: true, context_only: false }],
+          used_evidence_ids: [id],
+        })}
+      />
+    )
+    expect(screen.getAllByRole('button', { name: /citation 1/i })).toHaveLength(2)
+    expect(container.textContent).not.toContain('【')
+  })
 })

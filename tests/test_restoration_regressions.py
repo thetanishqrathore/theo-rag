@@ -497,3 +497,22 @@ def test_only_allowed_models_can_be_requested(monkeypatch) -> None:
         api_allowed_models="gpt-oss:120b, llama3.1:8b", ollama_model="gpt-oss:120b", secondary_ollama_model="",
     ))
     assert routes.resolve_model("llama3.1:8b") == "llama3.1:8b"
+
+
+def test_resolve_chunk_refs_corrects_observed_copy_errors() -> None:
+    import src.generation.generate as gen
+
+    # Real cases from the 20-answer review: last digit, and two digits, miscopied.
+    source_map = {
+        "2ef28348-78a8-4bd3-9485-a81a2ba48e7d": {},
+        "1c93626b-0a59-4f4e-b734-78813421c1dc": {},
+        "cda407f5-688c-4873-a5cb-dcd268e321fc": {},
+    }
+    text = "Election [chunk:2ef28348-78a8-4bd3-9485-a81a2ba48e7c]. Assurance [chunk:1c93626b-0a59-4f3e-b734-78813421c1dc]."
+    resolved = gen.resolve_chunk_refs(text, source_map)
+    assert "[chunk:2ef28348-78a8-4bd3-9485-a81a2ba48e7d]" in resolved
+    assert "[chunk:1c93626b-0a59-4f4e-b734-78813421c1dc]" in resolved
+
+    # Three differing digits, or an unrelated UUID, stay unresolved.
+    far = "X [chunk:2ef28348-78a8-4bd3-9485-a81a2ba48aaa]. Y [chunk:11111111-2222-3333-4444-555555555555]."
+    assert gen.resolve_chunk_refs(far, source_map) == far

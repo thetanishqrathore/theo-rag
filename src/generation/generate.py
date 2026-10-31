@@ -743,8 +743,17 @@ def generate_followups(
     ]
 
 
+# gpt-oss's native citation style uses fullwidth brackets: 【chunk:<id>】, a bare
+# 【<id>】, or 【chunk:<prefix>】 (31 of 200 benchmark answers). Without this they
+# parse as uncited and the answer is downgraded to uncited_narrow.
+_FULLWIDTH_CHUNK_RE = re.compile(
+    r"【\s*(?:chunk\s*[:\s]\s*)?([0-9a-fA-F][0-9a-fA-F\-\u2010\u2011]{7,})\s*】",
+    re.IGNORECASE,
+)
+
+
 def normalize_citation_markup(answer_text: str) -> str:
-    text = answer_text or ""
+    text = _FULLWIDTH_CHUNK_RE.sub(lambda m: f"[chunk:{m.group(1)}]", answer_text or "")
     # Normalize common CHUNK variants into canonical [chunk:UUID] form.
     text = re.sub(
         rf"\[\s*chunk\s+({_CHUNK_REF_PATTERN})\s*\]",
@@ -831,14 +840,15 @@ def _append_citation_item(citations: List[dict], source_item: dict) -> None:
 
 _LOOSE_CHUNK_REF_RE = re.compile(r"\[chunk:([0-9a-fA-F\-\u2010\u2011\u2012]{8,})\]", re.IGNORECASE)
 _MIN_CHUNK_PREFIX_LEN = 8
+_MAX_COPY_ERRORS = 2
 
 
 def resolve_chunk_refs(answer_text: str, source_map: Dict[str, dict]) -> str:
     """Rewrite [chunk:...] refs that unambiguously name provided evidence to full IDs.
 
     Some models (observed with gpt-oss:120b) abbreviate the evidence UUIDs they
-    were given to their first 8 hex characters, or write the UUID hyphens as
-    U+2011. A ref is rewritten only when it matches exactly one evidence ID in
+    were given to their first 8 hex characters, write the UUID hyphens as
+    U+2011, or miscopy one or two hex digits of the full UUID. A ref is rewritten only when it matches exactly one evidence ID in
     this answer's source map; unknown or ambiguous refs are left untouched and
     stay invalid downstream.
     """
@@ -855,6 +865,15 @@ def resolve_chunk_refs(answer_text: str, source_map: Dict[str, dict]) -> str:
             candidates = [key for lower, key in by_lower.items() if lower.startswith(ref)]
             if len(candidates) == 1:
                 return f"[chunk:{candidates[0]}]"
+        # Full-length copy errors (observed: one or two miscopied hex digits). Two
+        # unrelated UUIDs agreeing in all but <= 2 of 36 positions is practically
+        # impossible, so a unique near match is the evidence the model meant.
+        candidates = [
+            key for lower, key in by_lower.items()
+            if len(lower) == len(ref) and sum(a != b for a, b in zip(lower, ref)) <= _MAX_COPY_ERRORS
+        ]
+        if len(candidates) == 1:
+            return f"[chunk:{candidates[0]}]"
         return match.group(0)
 
     return _LOOSE_CHUNK_REF_RE.sub(_resolve, answer_text)

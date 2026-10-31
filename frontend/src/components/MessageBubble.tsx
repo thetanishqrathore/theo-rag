@@ -40,7 +40,8 @@ const formatFallbackReason = (reason?: string | null): string | null => {
 }
 
 const normalizeCitationTokens = (content: string) => {
-  let normalized = content
+  // gpt-oss's native style: 【chunk:<id>】 or a bare 【<id>】 (fullwidth brackets).
+  let normalized = content.replace(/【\s*(?:chunk\s*[:\s]\s*)?([0-9a-fA-F][0-9a-fA-F-]{7,})\s*】/gi, '[chunk:$1]')
   normalized = normalized.replace(/\[\s*chunk\s*[: ]\s*([0-9a-fA-F-]{1,})\s*\]/gi, '[chunk:$1]')
   normalized = normalized.replace(/\bchunk[_\s-]?id\b\s*:\s*([0-9a-fA-F-]{1,})/gi, '[chunk:$1]')
   // Bare `chunk:<id>` only; canonical `[chunk:<id>]` must not be wrapped again.

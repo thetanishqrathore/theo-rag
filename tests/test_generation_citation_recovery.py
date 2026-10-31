@@ -302,3 +302,14 @@ def test_uncited_narrow_fallback_cards_stay_bounded() -> None:
     )
     assert len(payload["citations"]) == 3
     assert all(card["context_only"] for card in payload["citations"])
+
+
+def test_fullwidth_bracket_citations_are_recognized() -> None:
+    cid = "3f052b2b-6e8c-4477-9b0d-4237fc0dfcb0"
+    text = f"A claim【chunk:{cid}】. Bare id【{cid}】. Prefix【chunk:3f052b2b】."
+    normalized = gen.normalize_citation_markup(text)
+    assert normalized.count(f"[chunk:{cid}]") == 2
+    assert "[chunk:3f052b2b]" in normalized
+    assert "【" not in normalized
+    resolved = gen.resolve_chunk_refs(normalized, {cid: {}})
+    assert resolved.count(f"[chunk:{cid}]") == 3
