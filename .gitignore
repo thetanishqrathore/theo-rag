@@ -16,8 +16,6 @@ wheels/
 data/
 logs/
 
-# UV artifacts
-uv.lock
 
 # macOS
 .DS_Store
