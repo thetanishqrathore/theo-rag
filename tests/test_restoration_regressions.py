@@ -277,20 +277,23 @@ def test_course_note_selection_skips_engine_that_leaks_page_headers(monkeypatch)
     import src.processing.extract_course_notes as ecn
 
     def candidate(engine, score, texts):
-        return SimpleNamespace(engine=engine, score=score, blocks=[SimpleNamespace(text=t) for t in texts])
+        return SimpleNamespace(engine=engine, score=score, blocks=texts)
 
-    leaky = candidate("pymupdf", 0.79, ["Body text Lesson 159 Page 17 Part VI more body"] * 3 + ["clean"] * 7)
+    # Rows stand in for derived paragraphs; "Page ii" (roman numerals) counts, as in validation.
+    leaky = candidate("pymupdf", 0.79, ["Body Lesson 159 Page 17 Part VI", "Part VI _ Page ii"] + ["clean"] * 8)
     clean = candidate("docling", 0.74, ["clean paragraph"] * 10)
+    monkeypatch.setattr(ecn, "_blocks_to_topical_nodes", lambda blocks, profile: (blocks, []))
+    monkeypatch.setattr(ecn, "derive_paragraph_rows_from_nodes", lambda nodes: [{"text": t} for t in nodes])
     monkeypatch.setattr(ecn, "get_config", lambda: SimpleNamespace(
         validation_profile_thresholds=lambda: {"clough_course_notes_v2": {"leak_warn": 0.12}}
     ))
 
-    selected, reason = ecn._select_course_note_candidate([leaky, clean])
+    selected, reason = ecn._select_course_note_candidate([leaky, clean], "default")
     assert selected.engine == "docling"
     assert reason == "page_marker_leakage_skipped:pymupdf"
 
     # When the best candidate is clean, the plain best score still wins.
-    selected, reason = ecn._select_course_note_candidate([candidate("pymupdf", 0.8, ["clean"] * 10), clean])
+    selected, reason = ecn._select_course_note_candidate([candidate("pymupdf", 0.8, ["clean"] * 10), clean], "default")
     assert selected.engine == "pymupdf" and reason == "highest_structure_quality_score"
 
 
@@ -308,3 +311,56 @@ def test_topical_book_is_topic_folder_not_format_folder() -> None:
     assert resolve_dean_book(
         Path("/c/dean/transcripts_books_bible/New_Test/John/Jno015.htm"), "transcripts_books_bible", "bible_books"
     )[0] == "John"
+
+
+def test_dean_semantic_html_blocks_exclude_inline_scripts() -> None:
+    from src.processing.extract_dean_html import _extract_semantic_blocks
+
+    html = (
+        "<html><head><style>p.MsoNormal {margin:0}</style></head><body>"
+        '<div id="overDiv"><script language="JavaScript">var overlib = "tooltip library code";</script></div>'
+        '<p class=MsoNormal>Israel\'s religious calendar is divided in two.</p>'
+        "</body></html>"
+    )
+    texts = [block.text for block in _extract_semantic_blocks(html)]
+    assert any("religious calendar" in t for t in texts)
+    assert not any("overlib" in t.lower() for t in texts)
+
+
+def test_reading_flow_ignores_repeated_outline_headings() -> None:
+    from src.processing.validate import check_reading_flow
+
+    def para(text, idx):
+        return SimpleNamespace(content=text, is_junk=False, paragraph_index=idx, word_count=len(text.split()))
+
+    headings = ["I. INTRODUCTION.", "II. THE PHILOSOPHICAL SETTING OF THE POST-REFORMATION AGE.", "VI. CONCLUSION."]
+    body = [f"Substantive paragraph number {i} discussing the doctrine of Scripture in some detail here." for i in range(20)]
+    outline_doc = [para(t, i) for i, t in enumerate(headings + body + headings)]
+    ok, _ = check_reading_flow(outline_doc, profile="chafer_lesson_pdf")
+    assert ok
+
+    repeated = body[:10] + body[:10]
+    ok, message = check_reading_flow([para(t, i) for i, t in enumerate(repeated)], profile="chafer_lesson_pdf")
+    assert not ok and "Duplicate" in message
+
+
+def test_accepted_validation_exceptions_are_scoped_and_recorded(monkeypatch) -> None:
+    import src.processing.validate as v
+
+    class FakeSession:
+        def execute(self, _stmt):
+            return SimpleNamespace(scalar_one_or_none=lambda: "2008-Chafer-HistoryOfDoctrine-Paper-026.pdf")
+
+    monkeypatch.setattr(v, "get_config", lambda: SimpleNamespace(
+        validation_accepted_exceptions='{"2008-Chafer-HistoryOfDoctrine-Paper-026.pdf": ["heading_list_coherence"]}'
+    ))
+    checks = {
+        "heading_list_coherence": (False, "6 abrupt heading depth jumps"),
+        "reading_flow": (False, "Duplicate paragraph content detected"),
+    }
+    accepted = v._apply_accepted_exceptions(SimpleNamespace(source_file_id="x"), FakeSession(), checks)
+
+    assert accepted == ["heading_list_coherence"]
+    assert checks["heading_list_coherence"][0] is True
+    assert "6 abrupt heading depth jumps" in checks["heading_list_coherence"][1]
+    assert checks["reading_flow"][0] is False  # unlisted checks still fail

@@ -20,7 +20,6 @@ from src.processing.extract import (
     _score_candidate,
     _select_best_candidate,
 )
-from src.processing.patterns import PAGE_MARKER_RE
 from src.processing.structured_nodes import derive_paragraph_rows_from_nodes
 from src.utils.config import get_config
 from src.utils.logging import setup_logging
@@ -90,14 +89,22 @@ def _annotate_front_matter(nodes: list[Any]) -> tuple[list[Any], int]:
     return ordered, flagged
 
 
-def _page_marker_ratio(candidate: Any) -> float:
-    blocks = [block for block in candidate.blocks if (block.text or "").strip()]
-    if not blocks:
+def _page_marker_ratio(candidate: Any, profile: str) -> float:
+    """Share of derived paragraphs that validation would count as page-marker leaks.
+
+    Mirrors validate._check_reading_flow: paragraphs (after node merging), any
+    "Page " occurrence (including roman-numeral front-matter pages).
+    """
+    if not candidate.blocks:
         return 0.0
-    return sum(1 for block in blocks if PAGE_MARKER_RE.search(block.text)) / len(blocks)
+    nodes, _tables = _blocks_to_topical_nodes(candidate.blocks, profile=profile)
+    rows = [row for row in derive_paragraph_rows_from_nodes(nodes) if (row.get("text") or "").strip()]
+    if not rows:
+        return 0.0
+    return sum(1 for row in rows if "Page " in row["text"]) / len(rows)
 
 
-def _select_course_note_candidate(candidates: list[Any]) -> tuple[Any, str]:
+def _select_course_note_candidate(candidates: list[Any], profile: str) -> tuple[Any, str]:
     """Pick the best-scoring engine, skipping ones that leak running page headers.
 
     Validation rejects course notes whose body text carries page markers above the
@@ -107,9 +114,9 @@ def _select_course_note_candidate(candidates: list[Any]) -> tuple[Any, str]:
     """
     best = _select_best_candidate(candidates)
     leak_limit = float(get_config().validation_profile_thresholds()["clough_course_notes_v2"]["leak_warn"])
-    if _page_marker_ratio(best) <= leak_limit:
+    if _page_marker_ratio(best, profile) <= leak_limit:
         return best, "highest_structure_quality_score"
-    clean = [c for c in candidates if c.blocks and _page_marker_ratio(c) <= leak_limit]
+    clean = [c for c in candidates if c.blocks and _page_marker_ratio(c, profile) <= leak_limit]
     if not clean:
         return best, "highest_structure_quality_score"
     return max(clean, key=lambda c: c.score), f"page_marker_leakage_skipped:{best.engine}"
@@ -201,7 +208,7 @@ def process_course_note_extraction(lesson_id: int, session: Session) -> dict:
             rescored, metrics = _score_candidate(candidate, profile=detected_profile)
             candidates[idx].score = rescored
             candidates[idx].metrics = metrics
-        selected, selection_reason = _select_course_note_candidate(candidates)
+        selected, selection_reason = _select_course_note_candidate(candidates, detected_profile)
 
         nodes, tables = _blocks_to_topical_nodes(selected.blocks, profile=detected_profile)
         nodes, front_count = _annotate_front_matter(nodes)

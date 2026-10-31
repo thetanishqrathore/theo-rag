@@ -132,6 +132,12 @@ class AppConfig(BaseSettings):
         default="{}",
         validation_alias="VALIDATION_PROFILE_THRESHOLD_OVERRIDES",
     )
+    # Reviewed per-source exceptions: {"<source filename>": ["<check name>", ...]}.
+    # Listed checks are recorded as accepted exceptions instead of failing the lesson.
+    validation_accepted_exceptions: str = Field(
+        default="{}",
+        validation_alias="VALIDATION_ACCEPTED_EXCEPTIONS",
+    )
     transcript_citation_include_chapter: bool = Field(
         default=True, validation_alias="TRANSCRIPT_CITATION_INCLUDE_CHAPTER"
     )
