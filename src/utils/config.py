@@ -337,6 +337,10 @@ class AppConfig(BaseSettings):
         validation_alias="RAG_CITATION_AUTOMAP_MAX_CITES_PER_SENTENCE",
     )
     api_allowed_origins: str = Field(default="http://localhost:5173", validation_alias="API_ALLOWED_ORIGINS")
+    # Models clients may request (comma-separated). Empty = OLLAMA_MODEL plus
+    # SECONDARY_OLLAMA_MODEL. Other installed Ollama models are never offered or used,
+    # so a public visitor cannot load an unrelated model onto the shared GPU.
+    api_allowed_models: str = Field(default="", validation_alias="API_ALLOWED_MODELS")
     # Built frontend (npm run build) served by the API at "/". Relative paths resolve
     # against the repository root; empty disables frontend serving.
     frontend_dist_path: str = Field(default="frontend/dist", validation_alias="FRONTEND_DIST_PATH")

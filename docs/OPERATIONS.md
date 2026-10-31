@@ -46,10 +46,32 @@ backups) lives **outside the checkout** under the parent of `RAW_DATA_PATH`
   a failing stage never advances status.
 - Per-file/per-stage outcomes: `build_reports/<run_id>.jsonl`; summary:
   `<run_id>_summary.json`.
-- Exit codes: `0` complete with exact Qdrant ID parity, `1` some included source
-  failed or is incomplete, `2` index parity mismatch.
-- After fixing a cause (tooling, manifest, config), retry failed lessons that
-  never reached chunking with `--retry-failed`.
+- Before processing, every selected source is re-hashed against the manifest,
+  the database is reconciled with the manifest, embedded lessons are checked
+  for their raw copy and canonical HTML, and lessons validated under a
+  different processing configuration are counted. After indexing, Qdrant
+  points without a PostgreSQL row are removed.
+- Exit codes: `0` complete with exact Qdrant ID parity; `1` an included source
+  failed, is incomplete, or lost an output; `2` index parity mismatch; `4` the
+  manifest no longer matches the files (regenerate it); `5` ingested sources
+  are no longer in the manifest (changed, removed or excluded); `6` lessons
+  built under another processing config with `--require-current-config`.
+- Flags: `--retry-failed` re-runs failed lessons that never reached chunking;
+  `--retire-stale` deletes retired sources with their rows, Qdrant points, raw
+  copy and canonical HTML; `--repair-outputs` restores missing raw copies and
+  canonical HTML; `--revalidate` re-checks embedded lessons and refreshes their
+  saved reports without changing status.
+- Every run summary records the Git revision, manifest digest, effective
+  processing configuration and tool versions; every validation report carries
+  a provenance stamp. Reviewed validation exceptions
+  (`VALIDATION_ACCEPTED_EXCEPTIONS`) are tied to a source checksum.
+- Builds and backups share `~/theo-rag-data/.corpus.lock` and never overlap.
+- `scripts/ops/test_build_resilience.sh` exercises an interrupted build,
+  edited/removed sources and a deleted output in an isolated scratch
+  environment.
+- Experiments that change processing should build a separate corpus (its own
+  database, Qdrant collections and data root via `DATABASE_URL`, `QDRANT_PORT`,
+  `RAW_DATA_PATH`, `CANONICAL_PATH`) and switch only after validation.
 - Pilot a subset with `--paths-file pilot.txt` (manifest-relative paths).
 - `./reset.sh rebuild` = start infrastructure, migrate, then the build above.
 
@@ -64,7 +86,7 @@ loginctl enable-linger "$USER"         # start at boot without a login session
 | --- | --- |
 | Status | `systemctl --user status theo-rag` |
 | Start / stop / restart | `systemctl --user start\|stop\|restart theo-rag` |
-| Logs | `journalctl --user -u theo-rag -f` (structured app log also in `$LOG_PATH/api.log`) |
+| Logs | `journalctl --user -u theo-rag -f`; structured app log in `$LOG_PATH/api.log`, rotated at 50 MB × 5 (`LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`) |
 | Disable at boot | `systemctl --user disable theo-rag` |
 
 `ExecStartPre` (`scripts/ops/wait_for_deps.sh`) starts the Postgres/Qdrant
@@ -73,10 +95,15 @@ exit (`Restart=always`). Run exactly one uvicorn worker: the GPU models and the
 generation semaphore are per process. `RAG_GENERATION_MAX_CONCURRENCY=1`
 serializes generations; extra requests get a `busy` error instead of queueing.
 
+Chats are stored only in the browser (IndexedDB, capped at 100 sessions × 400
+messages) and are not part of server backups; use **Export chats** / **Import
+chats** in the sidebar to keep them.
+
 Access: `http://localhost:8000` and `http://<LAN address>:8000`. The API has no
 authentication of its own; do not expose port 8000 beyond a trusted LAN.
-Internet exposure (Cloudflare Tunnel + Access) is described in
-`docs/cloudflare_tunnel_setup.md` and is not part of the Phase 1 baseline.
+Public access at `https://bibleai.raeonlabs.com` runs through a Cloudflare
+Tunnel (`theo-rag-tunnel.service`) that publishes only the endpoints the UI
+needs; see `docs/cloudflare_tunnel_setup.md`.
 
 ## 4. Health checks
 

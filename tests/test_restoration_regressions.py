@@ -476,3 +476,24 @@ def test_eval_evidence_support_rate_is_a_rate() -> None:
     row = es._score_case(case, query_result, None, evidence)
     assert row["evidence_support_rate"] == 0.75
     assert row["evidence_failed_ids"] == ["d"]
+
+
+def test_only_allowed_models_can_be_requested(monkeypatch) -> None:
+    from fastapi import HTTPException
+
+    import src.api.routes as routes
+
+    monkeypatch.setattr(routes, "get_config", lambda: SimpleNamespace(
+        api_allowed_models="", ollama_model="gpt-oss:120b", secondary_ollama_model="",
+    ))
+    assert routes.allowed_models() == ["gpt-oss:120b"]
+    assert routes.resolve_model(None) == "gpt-oss:120b"
+    assert routes.resolve_model("gpt-oss:120b") == "gpt-oss:120b"
+    with pytest.raises(HTTPException) as exc:
+        routes.resolve_model("qwen3-coder-next:latest")
+    assert exc.value.status_code == 400
+
+    monkeypatch.setattr(routes, "get_config", lambda: SimpleNamespace(
+        api_allowed_models="gpt-oss:120b, llama3.1:8b", ollama_model="gpt-oss:120b", secondary_ollama_model="",
+    ))
+    assert routes.resolve_model("llama3.1:8b") == "llama3.1:8b"

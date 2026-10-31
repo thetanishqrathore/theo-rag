@@ -95,6 +95,20 @@ def _get_generation_semaphore() -> tuple[threading.BoundedSemaphore, int]:
     return _GENERATION_SEMAPHORE, limit
 
 
+def allowed_models() -> list[str]:
+    config = get_config()
+    configured = [m.strip() for m in (config.api_allowed_models or "").split(",") if m.strip()]
+    return configured or [m for m in (config.ollama_model, config.secondary_ollama_model) if m]
+
+
+def resolve_model(requested: str | None) -> str:
+    """The model to use for a request; unlisted models are rejected (400)."""
+    model = requested or get_config().ollama_model
+    if model not in allowed_models():
+        raise HTTPException(status_code=400, detail=f"Model '{model}' is not available on this server.")
+    return model
+
+
 def validate_corpus(corpus: str) -> None:
     if not is_valid_corpus(corpus):
         supported = ", ".join(f"'{name}'" for name in CORPUS_IDS)
@@ -391,6 +405,8 @@ def query(
         )
 
     validate_query(request.query)
+    # Before acquiring the generation slot, so a rejected model cannot leak it.
+    requested_model = resolve_model(request.model)
 
     semaphore, limit = _get_generation_semaphore()
     acquired = semaphore.acquire(blocking=False)
@@ -407,7 +423,7 @@ def query(
     retrieval_time_ms: float | None = None
     generation_time_ms: float | None = None
     post_time_ms: float | None = None
-    model_name: str | None = request.model or get_config().ollama_model
+    model_name: str | None = requested_model
 
     try:
         history_dicts = [{"role": turn.role, "content": turn.content} for turn in request.history] if request.history else None
@@ -679,6 +695,7 @@ def query_stream(
 
     try:
         validate_query(request.query)
+        resolve_model(request.model)
     except HTTPException as e:
         return _validation_error_response(e)
 
@@ -970,7 +987,9 @@ async def get_models() -> dict:
     try:
         ollama_client = get_ollama_client(timeout=10)
         models_response = ollama_client.list()
-        models = [model.get("name", model.get("model", "unknown")) for model in models_response.get("models", [])]
+        installed = [model.get("name", model.get("model", "unknown")) for model in models_response.get("models", [])]
+        allowed = allowed_models()
+        models = [name for name in installed if name in allowed]
         return {"models": models, "default": config.ollama_model, "secondary": config.secondary_ollama_model}
     except Exception as exc:  # noqa: BLE001
         log.error("models_fetch_failed", error=str(exc))
@@ -1040,7 +1059,7 @@ def enrich_citations(request: EnrichCitationsRequest) -> dict:
     log = logger.bind(function="api_enrich_citations")
     config = get_config()
 
-    model_name = request.model or config.secondary_ollama_model or config.ollama_model
+    model_name = resolve_model(request.model or config.secondary_ollama_model or None)
     if not request.citations:
         return {"model": model_name, "insights": {}}
 

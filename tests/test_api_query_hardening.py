@@ -216,6 +216,8 @@ def test_query_accepts_flat_citation_cards_and_tracks_matched_rows(monkeypatch) 
         "get_config",
         lambda: SimpleNamespace(
             ollama_model="mistral",
+            secondary_ollama_model="",
+            api_allowed_models="",
             ollama_keepalive="5m",
             embedding_model="embed-model",
             reranker_model="rerank-model",
