@@ -65,10 +65,10 @@ same application. No runtime code had to be brought back from it.
 | Evaluation | Error-only streams counted as passes; evidence rate divided by the wrong count (1.49); telemetry join import failed | Fixed in `scripts/eval_suite.py` |
 | Exposure | Visitors could select any installed Ollama model (e.g. a 51 GB coder model) | `API_ALLOWED_MODELS`; tunnel publishes only UI endpoints |
 
-## Corpus decisions (please review)
+## Corpus decisions (confirmed by the owner, 2026-11-01)
 
 Every file is listed in `source_manifest.json` with its reason. Decisions that
-involved judgement:
+involved judgement (all confirmed as listed):
 
 1. **Clough transcripts**: the 227 original DOC files are canonical. The 227 PDF
    renditions and the July 2026 merged/split copies are excluded (alternate format
@@ -103,11 +103,11 @@ involved judgement:
    `Propitiation.doc`: 265 of 277 source words) accept `minimum_content`;
    `2008-Chafer-HistoryOfDoctrine-Paper-026.pdf` accepts `heading_list_coherence`
    (6 heading-depth jumps from Marker; text correct). All other checks apply.
-   **Provenance caveat:** the seven Bible-book lessons were validated during the
-   clean build under an earlier, broader setting (`dean_bible_html_v2` minimums
-   lowered to 2 blocks / 60 words). That setting was replaced by the per-file
-   exceptions before the retry run, so their saved validation reports show an
-   ordinary pass rather than an accepted exception. See open items.
+   The seven Bible-book lessons were first validated under an earlier, broader
+   setting (`dean_bible_html_v2` minimums lowered to 2 blocks / 60 words) that
+   the per-file exceptions replaced. A `--revalidate` run on 2026-11-01
+   (`build_20261101_022659`, 2,502/2,502, config drift 0) refreshed every saved
+   report, so all nine now record their accepted exception and reviewer.
 
 ## Known limitations (unchanged behaviour)
 
@@ -231,10 +231,13 @@ attribution and correct refusals. Claim-level fidelity, especially quotations,
 does not meet the release rule agreed in the plan ("no misattribution, no
 unsupported claims marked grounded"). This is gpt-oss behaviour under the
 existing prompt and the heuristic grounding policy, which this restoration
-deliberately did not change. Whether to accept it as a documented baseline
-limitation or fix it first (prompt rules for quotations, quote verification in
-post-processing, claim-level support checks) is the owner's decision before
-merge.
+deliberately did not change.
+
+**Decision (owner, 2026-11-01):** merge as the documented Phase 1 baseline, so
+`phase1-baseline` means exactly the restored behaviour, and fix quotation
+fidelity next on a separate branch (prompt rules for quotations, quote
+verification in post-processing, then a benchmark and review re-run measured
+against this baseline).
 
 ## Open items
 
@@ -242,9 +245,11 @@ Resolved since the 2026-10-31 review: backup verification and completeness (1),
 citation cards (2), intro attribution and inferred numbers (3), provenance and
 reconciliation (4), atomic migrations (5), log rotation and chat export (6).
 
+Decided 2026-11-01: quotation fidelity (merge as baseline, fix next), corpus
+decisions 1–8 confirmed, public site stays open without login.
+
 Still open:
-1. Decision on quotation fidelity (above) before merging and tagging
-   `phase1-baseline`.
+1. Quotation-fidelity fix on its own branch (next).
 2. An independent backup destination (external drive/NAS/remote) for
    `scripts/ops/copy_offsite.sh`; the workstation has one disk.
 3. Cloudflare WAF rate-limiting rule for `/api/query/stream` on
