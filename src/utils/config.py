@@ -88,6 +88,8 @@ class AppConfig(BaseSettings):
     canonical_path: str = "data/canonical"
     log_path: str = "data/logs"
     log_level: str = "INFO"
+    log_max_bytes: int = Field(default=50 * 1024 * 1024, validation_alias="LOG_MAX_BYTES")
+    log_backup_count: int = Field(default=5, validation_alias="LOG_BACKUP_COUNT")
     corpus_name: CorpusId = "clough"
     default_tag: str = "transcripts"
     transcript_lesson_overrides: str = "{}"

@@ -19,6 +19,8 @@ interface SidebarProps {
   mobile?: boolean
   mobileOpen?: boolean
   onMobileClose?: () => void
+  onExportSessions?: () => void
+  onImportSessions?: (file: File) => void
 }
 
 export function Sidebar({
@@ -35,7 +37,10 @@ export function Sidebar({
   mobile = false,
   mobileOpen = false,
   onMobileClose,
+  onExportSessions,
+  onImportSessions,
 }: SidebarProps) {
+  const importInputRef = useRef<HTMLInputElement>(null)
   const [search, setSearch] = useState('')
   const [showSearchFlyout, setShowSearchFlyout] = useState(false)
   const searchIconRef = useRef<HTMLButtonElement>(null)
@@ -241,6 +246,44 @@ export function Sidebar({
       </div>
 
       <div className="border-t border-white/5 px-3 py-4">
+        {(!collapsed || mobile) && (onExportSessions || onImportSessions) && (
+          <div className="mb-3 flex gap-2 text-[11px]">
+            {onExportSessions && (
+              <button
+                type="button"
+                onClick={onExportSessions}
+                className="flex-1 rounded-lg border border-white/10 px-2 py-1 text-gray-300 hover:bg-white/5"
+                title="Download all chats as a JSON file (chats are stored only in this browser)"
+              >
+                Export chats
+              </button>
+            )}
+            {onImportSessions && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => importInputRef.current?.click()}
+                  className="flex-1 rounded-lg border border-white/10 px-2 py-1 text-gray-300 hover:bg-white/5"
+                  title="Restore chats from an exported JSON file"
+                >
+                  Import chats
+                </button>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  aria-label="Import chats file"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    if (file) onImportSessions(file)
+                    e.target.value = ''
+                  }}
+                />
+              </>
+            )}
+          </div>
+        )}
         {collapsed && !mobile ? (
           <div className="flex justify-center">
             {(() => {

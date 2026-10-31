@@ -175,6 +175,7 @@ type ChatState = {
   deleteSession: (id: string) => void
   renameSession: (id: string, title: string) => void
   togglePinSession: (id: string) => void
+  importSessions: (incoming: Session[]) => { imported: number; kept: number }
   sendMessage: (query: string, corpus: string, model?: string) => Promise<void>
   cancelStream: (reason?: string) => void
   retryLastFailed: () => Promise<void>
@@ -279,6 +280,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       saveSessions(next)
       return { sessions: next }
     })
+  },
+
+  importSessions: (incoming) => {
+    const byId = new Map(get().sessions.map((s) => [s.id, s]))
+    for (const session of incoming) {
+      const existing = byId.get(session.id)
+      if (!existing || session.updatedAt > existing.updatedAt) byId.set(session.id, session)
+    }
+    const pruned = pruneSessions([...byId.values()])
+    saveSessions(pruned)
+    set({ sessions: pruned })
+    return { imported: incoming.length, kept: pruned.length }
   },
 
   togglePinSession: (id) => {

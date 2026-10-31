@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -47,6 +48,26 @@ def _checksum(path: Path) -> str:
 def _has_txn_control(sql: str) -> bool:
     upper = sql.upper()
     return "BEGIN;" in upper and "COMMIT;" in upper
+
+
+_TXN_LINE_RE = re.compile(r"^\s*(BEGIN|COMMIT)\s*;\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _migration_body(sql: str, filename: str, checksum: str) -> tuple[str, tuple[str, str]]:
+    """One transaction containing the migration and its ledger row.
+
+    Top-level BEGIN;/COMMIT; lines in the file are removed so an early COMMIT
+    cannot split the migration from its ledger entry (DO-block BEGIN ... END is
+    untouched: it has no semicolon after BEGIN).
+    """
+    # Executed with parameters, so literal % (e.g. format('%I')) must be escaped.
+    inner = _TXN_LINE_RE.sub("", sql).replace("%", "%%")
+    body = (
+        "BEGIN;\n"
+        + inner
+        + "\n;INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s);\nCOMMIT;"
+    )
+    return body, (filename, checksum)
 
 
 def _connect(database_url: str):
@@ -79,28 +100,32 @@ def bootstrap(cur) -> bool:
     return True
 
 
-def apply_pending(cur) -> int:
+def apply_pending(cur, allow_drift: bool = False) -> int:
     if _table_count(cur) == 0:
         raise SystemExit("Database is empty. Run with --bootstrap (or start docker compose on a fresh volume).")
+    # Serialize concurrent runners for the whole pass (released when the connection closes).
+    cur.execute("SELECT pg_advisory_lock(hashtext('theo_rag_schema_migrations'))")
     applied = _applied(cur)
+    drift = [
+        path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))
+        if path.name in applied and applied[path.name] != _checksum(path)
+    ]
+    if drift and not allow_drift:
+        raise SystemExit(
+            "applied migration(s) changed on disk (checksum mismatch): " + ", ".join(drift)
+            + ". Add a new migration instead of editing an applied one (or pass --allow-drift after review)."
+        )
     count = 0
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
         checksum = _checksum(path)
         if path.name in applied:
-            if applied[path.name] != checksum:
-                print(f"WARNING: {path.name} changed after it was applied (checksum mismatch); not re-running")
             continue
-        sql = path.read_text()
-        body = sql if _has_txn_control(sql) else "BEGIN;\n" + sql + "\nCOMMIT;"
+        body, params = _migration_body(path.read_text(), path.name, checksum)
         try:
-            cur.execute(body)
+            cur.execute(body, params)
         except Exception as exc:
             cur.execute("ROLLBACK;")
-            raise SystemExit(f"migration {path.name} failed: {exc}") from exc
-        cur.execute(
-            "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
-            (path.name, checksum),
-        )
+            raise SystemExit(f"migration {path.name} failed (nothing recorded): {exc}") from exc
         print(f"applied {path.name}")
         count += 1
     print(f"{count} migration(s) applied; {len(applied) + count} recorded")
@@ -145,6 +170,7 @@ def main() -> None:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--database-url", default=None)
+    parser.add_argument("--allow-drift", action="store_true", help="Continue although an applied migration file changed")
     args = parser.parse_args()
 
     conn = _connect(args.database_url or get_config().database_url)
@@ -157,7 +183,7 @@ def main() -> None:
                 sys.exit(0 if check_orm(cur) else 1)
             if args.bootstrap:
                 bootstrap(cur)
-            apply_pending(cur)
+            apply_pending(cur, allow_drift=args.allow_drift)
     finally:
         conn.close()
 

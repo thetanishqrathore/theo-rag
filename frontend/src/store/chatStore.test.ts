@@ -8,7 +8,8 @@ vi.mock('../lib/api', () => ({
   streamQuery: vi.fn(),
 }))
 
-vi.mock('../lib/storage', () => ({
+vi.mock('../lib/storage', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/storage')>()),
   loadSessions: vi.fn(async () => []),
   saveSessions: vi.fn(async () => undefined),
   loadSettings: vi.fn(async () => ({})),
@@ -70,5 +71,29 @@ describe('chatStore streaming lifecycle', () => {
     const session = state.sessions.find((s) => s.id === 's1')
     const assistant = session?.messages.find((m) => m.role === 'assistant')
     expect(assistant && assistant.role === 'assistant' ? assistant.stream_error_type : null).toBe('aborted')
+  })
+})
+
+
+describe('chat export/import', () => {
+  it('round-trips sessions and merges by id keeping the newer copy', async () => {
+    const { buildSessionsExport, parseSessionsExport } = await import('../lib/storage')
+    const older = { id: 's1', title: 'Old', updatedAt: 1, messages: [] }
+    const newer = { id: 's1', title: 'New', updatedAt: 2, messages: [] }
+    const other = { id: 's2', title: 'Other', updatedAt: 3, messages: [] }
+
+    const parsed = parseSessionsExport(buildSessionsExport([newer, other]))
+    expect(parsed.map((s) => s.id)).toEqual(['s1', 's2'])
+
+    useChatStore.setState({ sessions: [older] })
+    const result = useChatStore.getState().importSessions(parsed)
+    expect(result).toEqual({ imported: 2, kept: 2 })
+    const sessions = useChatStore.getState().sessions
+    expect(sessions.find((s) => s.id === 's1')?.title).toBe('New')
+  })
+
+  it('rejects files that are not chat exports', async () => {
+    const { parseSessionsExport } = await import('../lib/storage')
+    expect(() => parseSessionsExport(JSON.stringify({ hello: 'world' }))).toThrow(/not a theo-rag chat export/i)
   })
 })

@@ -35,6 +35,14 @@ PY="$ROOT_DIR/.venv/bin/python"
 exec 9>"$DATA_ROOT/.corpus.lock"
 flock -n 9 || { echo "a corpus build (or another backup) holds $DATA_ROOT/.corpus.lock; retry later" >&2; exit 3; }
 
+# Refuse to start without room for a full backup (estimated from the last one, min 4 GB).
+last="$(ls -td "$(dirname "$DEST")"/2*/ 2>/dev/null | head -1 || true)"
+need_kb=$(( 4 * 1024 * 1024 ))
+[[ -n "$last" ]] && need_kb=$(( $(du -sk "$last" | cut -f1) * 2 > need_kb ? $(du -sk "$last" | cut -f1) * 2 : need_kb ))
+mkdir -p "$(dirname "$DEST")"
+free_kb="$(df -Pk "$(dirname "$DEST")" | awk 'NR==2 {print $4}')"
+(( free_kb > need_kb )) || { echo "not enough free space: ${free_kb} KB free, need ${need_kb} KB" >&2; exit 1; }
+
 mkdir -p "$DEST/qdrant" "$DEST/config" "$DEST/originals"
 
 # Originals: archive (no-op when unchanged) and link the matching revision.
