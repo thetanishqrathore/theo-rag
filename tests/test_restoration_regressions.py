@@ -292,3 +292,19 @@ def test_course_note_selection_skips_engine_that_leaks_page_headers(monkeypatch)
     # When the best candidate is clean, the plain best score still wins.
     selected, reason = ecn._select_course_note_candidate([candidate("pymupdf", 0.8, ["clean"] * 10), clean])
     assert selected.engine == "pymupdf" and reason == "highest_structure_quality_score"
+
+
+def test_topical_book_is_topic_folder_not_format_folder() -> None:
+    from src.ingestion.shared import resolve_dean_book
+
+    def book(path):
+        return resolve_dean_book(Path(path), "topical_studies", "topical_studies")[0]
+
+    assert book("/c/dean/topical_studies/html/Tabernacle/2008-Tabernacle-001.htm") == "Tabernacle"
+    assert book("/c/dean/topical_studies/pdf/Walking/Walking.pdf") == "Walking"
+    assert book("/c/dean/topical_studies/doc/Faith/Faith.doc") == "Faith"
+    # Topic-first layouts are unchanged.
+    assert book("/c/dean/topical_studies/Salvation/Salvation-001.rtf") == "Salvation"
+    assert resolve_dean_book(
+        Path("/c/dean/transcripts_books_bible/New_Test/John/Jno015.htm"), "transcripts_books_bible", "bible_books"
+    )[0] == "John"

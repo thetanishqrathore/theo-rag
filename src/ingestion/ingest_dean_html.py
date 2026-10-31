@@ -24,6 +24,7 @@ from src.ingestion.shared import (
     ensure_raw_copy,
     mark_source_file_completed,
     parse_dean_lesson as _parse_lesson,
+    next_dean_lesson_number,
     resolve_dean_book as _resolve_book,
     resolve_dean_collection as _resolve_collection,
     resolve_dean_rel_path as _resolve_rel_path,
@@ -126,7 +127,7 @@ def ingest_dean_html(html_path: Path, tag: str, session: Session | None = None) 
                     lesson_code = stem
                 lesson_number_source = "override"
                 break
-        if lesson_number is None:
+        if lesson_number is None and collection == "bible_books":
             raise ValueError(f"Unable to derive lesson_number for '{filename}'. Add override in DEAN_LESSON_OVERRIDES.")
 
         raw_path = Path(get_config().raw_data_path) / "dean" / rel_path
@@ -142,6 +143,12 @@ def ingest_dean_html(html_path: Path, tag: str, session: Session | None = None) 
             display_name=display_name,
             parser_profile=parser_profile,
         )
+        if lesson_number is None:
+            # Single-document topical studies carry no number; sequence them within
+            # their topic like the DOC/PDF topical ingesters do.
+            lesson_number = next_dean_lesson_number(session, book_id)
+            lesson_code = stem
+            lesson_number_source = "folder_sequence"
 
         file_tag_id = get_file_tag_id(session, "dean", tag)
         source_file_id = insert_source_file(
