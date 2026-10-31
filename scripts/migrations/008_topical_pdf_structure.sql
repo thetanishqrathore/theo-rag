@@ -38,15 +38,18 @@ CREATE TABLE IF NOT EXISTS dean_topical_pdf_tables (
     table_html TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_lesson
-ON dean_topical_pdf_nodes(lesson_id);
-
-CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_lesson_order
-ON dean_topical_pdf_nodes(lesson_id, order_index);
-
-CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_path
-ON dean_topical_pdf_nodes(lesson_id, node_path);
-
-CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_parent
-ON dean_topical_pdf_nodes(parent_node_id);
-
+-- On schemas created from the current init.sql (or after 009 renamed these
+-- tables), dean_topical_pdf_nodes is a compatibility VIEW; indexes then live
+-- on dean_structured_nodes and must not be created on the view.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = 'dean_topical_pdf_nodes' AND c.relkind = 'r'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_lesson ON dean_topical_pdf_nodes(lesson_id)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_lesson_order ON dean_topical_pdf_nodes(lesson_id, order_index)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_path ON dean_topical_pdf_nodes(lesson_id, node_path)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_dean_topical_pdf_nodes_parent ON dean_topical_pdf_nodes(parent_node_id)';
+    END IF;
+END $$;
