@@ -33,6 +33,7 @@ from src.utils.logging import setup_logging
 logger = structlog.get_logger()
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", flags=re.IGNORECASE | re.DOTALL)
+_SCRIPT_RE = re.compile(r"<script\b[^>]*>.*?</script>", flags=re.IGNORECASE | re.DOTALL)
 _COMMENT_RE = re.compile(r"<!--.*?-->", flags=re.DOTALL)
 _BLOCK_RE = re.compile(r"<(p|h1|h2|h3|h4|li|blockquote)[^>]*>(.*?)</\1>", flags=re.IGNORECASE | re.DOTALL)
 _STRONG_BREAK_RE = re.compile(r"(?:<br\s*/?>\s*){2,}", flags=re.IGNORECASE)
@@ -221,6 +222,9 @@ def _tag_and_profile_for_lesson(lesson_id: int, session: Session) -> tuple[str, 
 
 
 def _extract_semantic_blocks(html: str) -> list[RawBlock]:
+    # Inline <script> (e.g. the overLIB tooltip library in some Word exports) is not
+    # lesson text. <style> stays: paragraph depths are read from its Mso classes.
+    html = _SCRIPT_RE.sub(" ", html)
     parser = _DocHtmlBlockParser(_parse_doc_paragraph_style_depths(html))
     parser.feed(html)
     blocks = [block for block in parser.blocks if (block.text or "").strip()]

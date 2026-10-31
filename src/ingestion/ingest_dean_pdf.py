@@ -23,6 +23,7 @@ from src.db.operations import (
 from src.db.session import get_sessionmaker
 from src.ingestion.shared import (
     calculate_checksum as _checksum,
+    dean_lesson_override,
     ensure_raw_copy,
     mark_source_file_completed,
     next_dean_lesson_number as _next_lesson_number,
@@ -230,9 +231,13 @@ def ingest_dean_pdf(pdf_path: Path, tag: str, session: Session | None = None) ->
         profile, profile_confidence, quality_flags = detect_topical_pdf_profile(top_text, rel_path)
         title, title_source = extract_title_with_source(stem, top_text, pdf_metadata)
         speaker, speaker_source = extract_speaker_with_source(top_text, get_config().dean_default_speaker)
-        lesson_number, lesson_code, lesson_number_source = extract_lesson_number_with_source(
-            stem, top_text, session, book_id
-        )
+        override = dean_lesson_override(rel_path, pdf_path.name, stem)
+        if override is not None:
+            lesson_number, lesson_code, lesson_number_source = override["lesson_number"], stem, "override"
+        else:
+            lesson_number, lesson_code, lesson_number_source = extract_lesson_number_with_source(
+                stem, top_text, session, book_id
+            )
         parsed_date, date_source = extract_date_with_source(top_text, pdf_metadata)
 
         file_tag_id = get_file_tag_id(session, "dean", tag)
@@ -268,6 +273,7 @@ def ingest_dean_pdf(pdf_path: Path, tag: str, session: Session | None = None) ->
                 "title_source": title_source,
                 "speaker_source": speaker_source,
                 "lesson_number_source": lesson_number_source,
+                **({"lesson_number_override": override} if override is not None else {}),
                 "date_source": date_source,
                 "quality_flags": quality_flags,
                 "engine_candidates": [],

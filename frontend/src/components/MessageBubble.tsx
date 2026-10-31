@@ -40,11 +40,13 @@ const formatFallbackReason = (reason?: string | null): string | null => {
 }
 
 const normalizeCitationTokens = (content: string) => {
-  let normalized = content
+  // gpt-oss's native style: 【chunk:<id>】 or a bare 【<id>】 (fullwidth brackets).
+  let normalized = content.replace(/【\s*(?:chunk\s*[:\s]\s*)?([0-9a-fA-F][0-9a-fA-F-]{7,})\s*】/gi, '[chunk:$1]')
   normalized = normalized.replace(/\[\s*chunk\s*[: ]\s*([0-9a-fA-F-]{1,})\s*\]/gi, '[chunk:$1]')
   normalized = normalized.replace(/\bchunk[_\s-]?id\b\s*:\s*([0-9a-fA-F-]{1,})/gi, '[chunk:$1]')
-  normalized = normalized.replace(/\bchunk\s*:\s*([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
-  normalized = normalized.replace(/\bchunk\s+([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
+  // Bare `chunk:<id>` only; canonical `[chunk:<id>]` must not be wrapped again.
+  normalized = normalized.replace(/(?<!\[)\bchunk\s*:\s*([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
+  normalized = normalized.replace(/(?<!\[)\bchunk\s+([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
   normalized = normalized.replace(/\[\s*source\s+(\d{1,3})\s*\]/gi, '[SOURCE $1]')
   normalized = normalized.replace(/\(\s*source\s+(\d{1,3})\s*\)/gi, '[SOURCE $1]')
   normalized = normalized.replace(/\[\s*·\s*\]/g, '')
@@ -62,21 +64,24 @@ const transformCitationsToLinks = (
     if (/^\d+$/.test(ref)) {
       const ordinal = Number(ref)
       const evidenceId = evidenceByOrdinal.get(ordinal)
-      return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : ''
+      return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : `[?](#unresolved-${ordinal})`
     }
     const lookupId = ref.toLowerCase()
     const index = indexMap.get(lookupId) ?? 0
-    return index ? `[${index}](#cite-${lookupId})` : ''
+    // A reference with no matching source stays visible as an unresolved marker.
+    return index ? `[${index}](#cite-${lookupId})` : `[?](#unresolved-${lookupId})`
   })
   rendered = rendered.replace(/\[SOURCE\s+(\d{1,3})\]/gi, (_match, rawNum) => {
     const ordinal = Number(rawNum)
     const evidenceId = evidenceByOrdinal.get(ordinal)
-    return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : ''
+    return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : `[?](#unresolved-${ordinal})`
   })
   return rendered
     .replace(/\[(?:chunk|SOURCE)[^\]]*\]/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\s+([.,;:!?])/g, '$1')
+    // Collapse horizontal whitespace only: newlines (and "  \n" hard breaks) carry
+    // the markdown structure.
+    .replace(/[^\S\n]{2,}(?!\n)/g, ' ')
+    .replace(/[^\S\n]+([.,;:!?])/g, '$1')
     .trim()
 }
 
@@ -178,6 +183,17 @@ export function MessageBubble({
             contextOnly={info?.contextOnly}
             label={info?.tooltipLabel}
           />
+        )
+      }
+      if (href && href.startsWith('#unresolved-')) {
+        return (
+          <span
+            className="citation-chip unresolved"
+            title="This citation could not be matched to a returned source"
+            aria-label="Unresolved citation"
+          >
+            ?
+          </span>
         )
       }
       if (!href) return <span>{children}</span>

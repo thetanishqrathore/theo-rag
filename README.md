@@ -10,16 +10,24 @@
 [![Ollama](https://img.shields.io/badge/LLM-Ollama%20(local)-000000?logo=ollama&logoColor=white)](https://ollama.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`theo-rag` is a production-grade RAG system that answers questions over a
-curated document corpus **without hallucinating**. Every answer is grounded in
-retrieved evidence, every claim carries a resolvable citation, and the system
-**refuses to answer when the evidence is insufficient** rather than guessing.
+`theo-rag` is an evidence-first RAG system that answers questions over a
+curated document corpus **only from retrieved evidence**. Answers cite the
+passages they draw on with resolvable `[chunk:<id>]` citations, and the system
+**narrows or refuses when the evidence is weak** rather than guessing.
+
+What is and is not guaranteed: the confident / narrow / refuse decision is a
+heuristic over reranker scores and lexical overlap, and `grounded=true` means
+the answer carries valid citations to the evidence it was given. It is not
+an automatic proof that every sentence follows from the cited passage. A narrow
+answer without citations is returned with `grounded=false` and
+`grounding_reason="uncited_narrow"`. Expert review remains the standard for
+theological accuracy.
 
 It is designed to run **entirely on-premises** — local LLM (Ollama), local
 embeddings (SentenceTransformers), local vector search (Qdrant), local
 relational store (PostgreSQL + pgvector). No document ever leaves the machine.
 The reference deployment runs on a single workstation with an **NVIDIA RTX PRO
-6000** GPU serving a 70B-parameter model.
+6000** GPU serving GPT-OSS 120B.
 
 The reference corpora are two theological teaching archives (the *Clough* and
 *Dean* corpora), but the pipeline is corpus-agnostic: point it at any collection
@@ -135,8 +143,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the deep dive.
 | API | FastAPI, Uvicorn, Pydantic v2 |
 | Retrieval | Qdrant (vectors), PostgreSQL + pgvector (full-text + metadata) |
 | Embeddings / rerank | SentenceTransformers |
-| Generation | Ollama (e.g. `llama3.1:70b` primary, `llama3.1:8b` secondary) |
-| Extraction | PyMuPDF, Docling |
+| Generation | Ollama (`gpt-oss:120b`; optional smaller secondary model for helper calls) |
+| Extraction | PyMuPDF, Docling, Marker 1.x, LibreOffice |
 | Data / ORM | SQLAlchemy 2.0, psycopg2 |
 | Logging | structlog |
 | Frontend | React, Vite, TypeScript, Zustand, Tailwind, Vitest |
@@ -147,71 +155,53 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the deep dive.
 
 ## Quickstart
 
+Full setup, service management, backup/restore and rollback live in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md). The short version:
+
 ### Prerequisites
-- Docker + Docker Compose
-- Python 3.12
-- [Ollama](https://ollama.com/) running locally with a pulled model
-- Node.js 18+ (for the frontend)
+- Docker + Docker Compose (user in the `docker` group)
+- Python 3.12 and [uv](https://docs.astral.sh/uv/)
+- Node.js 22 (`frontend/.nvmrc`; Vite 7 needs `^20.19.0 || >=22.12.0`)
+- [Ollama](https://ollama.com/) with `gpt-oss:120b` pulled
+- LibreOffice (`soffice`) for DOC/RTF sources and Marker **1.x**
+  (`uv tool install "marker-pdf<2"`) for Dean topical PDFs
 
-### 1 · Start infrastructure
+### 1 · Install and start infrastructure
 ```bash
-docker compose up -d          # PostgreSQL (pgvector), Qdrant, Adminer
+uv sync --locked --extra dev               # .venv from uv.lock
+cp .env.public.example .env                # set data paths and tool commands
+docker compose up -d                       # PostgreSQL (pgvector) + Qdrant on 127.0.0.1
+.venv/bin/python scripts/migrate.py        # empty volume: init.sql ran once; this applies migrations
+.venv/bin/python scripts/migrate.py --check
 ```
 
-### 2 · Python environment
+### 2 · Build the corpus
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+.venv/bin/python scripts/source_manifest.py --root /path/to/bible_corpus \
+  --output ~/theo-rag-data/source_manifest.json
+.venv/bin/python scripts/build_corpus.py --manifest ~/theo-rag-data/source_manifest.json \
+  --report-dir ~/theo-rag-data/build_reports       # resumable; re-run after interruptions
 ```
+The manifest records every file with an include/exclude reason. The build runs
+ingest → extract → structure → validate → canonical HTML → parent/child chunks →
+embeddings → Qdrant, then checks PostgreSQL/Qdrant parity by chunk ID.
 
-### 3 · Configure environment
-Copy the example env file and adjust as needed:
+### 3 · Run
 ```bash
-cp .env.public.example .env
+npm --prefix frontend ci && npm --prefix frontend run build
+.venv/bin/uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 1
+# or install the boot-time service:  scripts/ops/install_service.sh
 ```
-Key variables: `DATABASE_URL`, `QDRANT_HOST`/`QDRANT_PORT`,
-`QDRANT_EXPECTED_DIM`, `OLLAMA_HOST`, `OLLAMA_MODEL`,
-`SECONDARY_OLLAMA_MODEL`, `API_ALLOWED_ORIGINS`.
-
-### 4 · Apply database schema
-```bash
-psql "$DATABASE_URL" -f scripts/init.sql
-for m in scripts/migrations/*.sql; do psql "$DATABASE_URL" -f "$m"; done
-```
-
-### 5 · Build a corpus
-Place your source documents in `test/` (see [`test/README.md`](test/README.md)),
-then run the pipeline:
-```bash
-python -m src.ingestion  test/ --batch --tag transcripts
-python -m src.processing extract   --all --tag transcripts
-python -m src.processing structure --all --tag transcripts
-python -m src.processing validate  --all --tag transcripts
-python -m src.chunking   parent    --all --tag transcripts
-python -m src.chunking   child     --all --tag transcripts
-python -m src.processing embed     --all --tag transcripts
-python -m src.processing index clough
-```
-
-### 6 · Run the API
-```bash
-python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
-curl -s http://localhost:8000/api/health
-```
-
-### 7 · Run the frontend
-```bash
-cd frontend
-npm ci
-npm run dev            # set VITE_API_BASE if the API is on another origin
-```
+The API serves the web UI at `http://localhost:8000/` (and on the LAN address);
+`/api/*` and the `/static/*` evidence routes are unchanged. For UI development,
+`npm --prefix frontend run dev` serves on :5173 against the API on :8000.
 
 ### Smoke test
 ```bash
+curl -s localhost:8000/api/health
 curl -N http://localhost:8000/api/query/stream \
   -H "Content-Type: application/json" \
-  -d '{"query":"What is faith-rest?","corpus":"clough","top_k":5}'
+  -d '{"query":"What is faith-rest?","corpus":"clough","top_k":7}'
 ```
 
 ---

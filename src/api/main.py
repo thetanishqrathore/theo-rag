@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import structlog
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -43,6 +44,35 @@ app.add_middleware(
 app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(router)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# Prefixes owned by the API and canonical evidence; never answered with the SPA shell.
+_NON_SPA_PREFIXES = ("api/", "static/", "docs", "redoc", "openapi.json")
+
+
+def _resolve_frontend_dist(raw_path: str) -> Path | None:
+    if not raw_path.strip():
+        return None
+    dist = Path(raw_path).expanduser()
+    if not dist.is_absolute():
+        dist = REPO_ROOT / dist
+    return dist.resolve() if (dist / "index.html").is_file() else None
+
+
+frontend_dist = _resolve_frontend_dist(config.frontend_dist_path)
+if frontend_dist is not None:
+    if (frontend_dist / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="frontend-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def frontend(full_path: str) -> FileResponse:
+        if full_path.startswith(_NON_SPA_PREFIXES):
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = (frontend_dist / full_path).resolve()
+        if full_path and candidate.is_file() and frontend_dist in candidate.parents:
+            return FileResponse(candidate)
+        # SPA shell must not be cached, so a rebuilt frontend is picked up immediately.
+        return FileResponse(frontend_dist / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.on_event("startup")

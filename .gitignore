@@ -16,11 +16,12 @@ wheels/
 data/
 logs/
 
-# UV artifacts
-uv.lock
 
 # macOS
 .DS_Store
 
 # Local agent / tooling settings
 .claude/
+
+# Evaluation run artifacts (contain corpus text and query logs)
+eval/reports/

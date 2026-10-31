@@ -7,7 +7,7 @@ import time
 import json
 import math
 import threading
-from typing import Optional, List, Dict, Generator, Callable
+from typing import Optional, List, Dict, Generator, Callable, Iterable
 
 import ollama
 import structlog
@@ -22,7 +22,7 @@ from src.observability.logging import log_event
 from src.observability.timer import SpanTimer
 from src.utils.config import get_config
 from src.utils.logging import setup_logging
-from src.utils.ollama_client import get_ollama_client
+from src.utils.ollama_client import get_ollama_client, helper_num_ctx
 from src.utils.text import STOPWORDS
 
 logger = structlog.get_logger()
@@ -32,6 +32,8 @@ _CHUNK_ID_PATTERN = r"[0-9a-fA-F-]{8,}"
 _CHUNK_ORDINAL_PATTERN = r"\d{1,3}"
 _CHUNK_REF_PATTERN = rf"(?:{_CHUNK_ID_PATTERN}|{_CHUNK_ORDINAL_PATTERN})"
 CITATION_STRATEGY_VERSION = "recall-first-single-profile-v1"
+# Seconds between status heartbeats while a reasoning model streams only its reasoning.
+REASONING_HEARTBEAT_SEC = 5.0
 _SMALL_TALK_EXACT = {
     "hi",
     "hello",
@@ -377,6 +379,16 @@ def evaluate_sufficiency(query: str, parent_chunks: List[SearchResult], corpus: 
     return "narrow", metrics
 
 
+def _answer_options(num_ctx: int, temperature: float) -> dict:
+    # num_predict is a sampling option: changing it does not reload the model.
+    return {"num_ctx": num_ctx, "temperature": temperature, "num_predict": int(get_config().rag_generation_max_tokens)}
+
+
+# A generation that returns no answer content (reasoning only, or a runaway
+# reasoning loop cut off by num_predict) is retried this many times.
+EMPTY_GENERATION_RETRIES = 1
+
+
 def generate_answer(
     prompt: str,
     client: ollama.Client,
@@ -389,25 +401,36 @@ def generate_answer(
 ) -> str:
     if num_ctx is None:
         num_ctx = get_config().ollama_num_ctx
-    if system_message is not None and user_message is not None:
-        response = client.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message},
-            ],
-            options={"num_ctx": num_ctx, "temperature": temperature},
-            keep_alive=keep_alive,
+    text = ""
+    for attempt in range(EMPTY_GENERATION_RETRIES + 1):
+        if system_message is not None and user_message is not None:
+            response = client.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message},
+                ],
+                options=_answer_options(num_ctx, temperature),
+                keep_alive=keep_alive,
+            )
+            text = response.get("message", {}).get("content", "")
+        else:
+            response = client.generate(
+                model=model,
+                prompt=prompt,
+                options=_answer_options(num_ctx, temperature),
+                keep_alive=keep_alive,
+            )
+            text = response.get("response", "")
+        if text.strip():
+            break
+        log_event(
+            "generation_empty",
+            span="generation",
+            attempt=attempt + 1,
+            done_reason=response.get("done_reason"),
+            eval_count=response.get("eval_count"),
         )
-        text = response.get("message", {}).get("content", "")
-    else:
-        response = client.generate(
-            model=model,
-            prompt=prompt,
-            options={"num_ctx": num_ctx, "temperature": temperature},
-            keep_alive=keep_alive,
-        )
-        text = response.get("response", "")
     if not text.strip():
         raise RuntimeError("Ollama returned an empty response.")
     return text.strip()
@@ -642,9 +665,12 @@ def build_grounding_citation_payloads(
                 resolved_chunks.append(chunk)
                 seen.add(chunk_id)
 
+    # Every source the answer cites gets a card, so each [chunk:] reference in the
+    # answer resolves for the client; max_cards only bounds the context-only
+    # fallback cards shown for an uncited narrow answer.
     citation_cards = [
         _build_citation_card_payload(chunk, force_context_only=bool(fallback_reason))
-        for chunk in resolved_chunks[:max_cards]
+        for chunk in resolved_chunks
     ]
     return {
         "citations": citation_cards,
@@ -695,7 +721,7 @@ def generate_followups(
         response = client.generate(
             model=model,
             prompt=prompt,
-            options={"num_ctx": 2048, "temperature": 0.2},
+            options={"num_ctx": helper_num_ctx(model, 2048), "temperature": 0.2},
             keep_alive=keep_alive,
         )
         raw = response.get("response", "").strip()
@@ -717,8 +743,17 @@ def generate_followups(
     ]
 
 
+# gpt-oss's native citation style uses fullwidth brackets: 【chunk:<id>】, a bare
+# 【<id>】, or 【chunk:<prefix>】 (31 of 200 benchmark answers). Without this they
+# parse as uncited and the answer is downgraded to uncited_narrow.
+_FULLWIDTH_CHUNK_RE = re.compile(
+    r"【\s*(?:chunk\s*[:\s]\s*)?([0-9a-fA-F][0-9a-fA-F\-\u2010\u2011]{7,})\s*】",
+    re.IGNORECASE,
+)
+
+
 def normalize_citation_markup(answer_text: str) -> str:
-    text = answer_text or ""
+    text = _FULLWIDTH_CHUNK_RE.sub(lambda m: f"[chunk:{m.group(1)}]", answer_text or "")
     # Normalize common CHUNK variants into canonical [chunk:UUID] form.
     text = re.sub(
         rf"\[\s*chunk\s+({_CHUNK_REF_PATTERN})\s*\]",
@@ -801,6 +836,47 @@ def _append_citation_item(citations: List[dict], source_item: dict) -> None:
             "is_front_matter": source_item.get("is_front_matter", False),
         }
     )
+
+
+_LOOSE_CHUNK_REF_RE = re.compile(r"\[chunk:([0-9a-fA-F\-\u2010\u2011\u2012]{8,})\]", re.IGNORECASE)
+_MIN_CHUNK_PREFIX_LEN = 8
+_MAX_COPY_ERRORS = 2
+
+
+def resolve_chunk_refs(answer_text: str, source_map: Dict[str, dict]) -> str:
+    """Rewrite [chunk:...] refs that unambiguously name provided evidence to full IDs.
+
+    Some models (observed with gpt-oss:120b) abbreviate the evidence UUIDs they
+    were given to their first 8 hex characters, write the UUID hyphens as
+    U+2011, or miscopy one or two hex digits of the full UUID. A ref is rewritten only when it matches exactly one evidence ID in
+    this answer's source map; unknown or ambiguous refs are left untouched and
+    stay invalid downstream.
+    """
+    keys = [str(key) for key in source_map.keys() if key != "__order__"]
+    if not answer_text or not keys:
+        return answer_text
+    by_lower = {key.lower(): key for key in keys}
+
+    def _resolve(match: re.Match) -> str:
+        ref = match.group(1).translate({0x2010: "-", 0x2011: "-", 0x2012: "-"}).lower()
+        if ref in by_lower:
+            return f"[chunk:{by_lower[ref]}]"
+        if len(ref) >= _MIN_CHUNK_PREFIX_LEN:
+            candidates = [key for lower, key in by_lower.items() if lower.startswith(ref)]
+            if len(candidates) == 1:
+                return f"[chunk:{candidates[0]}]"
+        # Full-length copy errors (observed: one or two miscopied hex digits). Two
+        # unrelated UUIDs agreeing in all but <= 2 of 36 positions is practically
+        # impossible, so a unique near match is the evidence the model meant.
+        candidates = [
+            key for lower, key in by_lower.items()
+            if len(lower) == len(ref) and sum(a != b for a, b in zip(lower, ref)) <= _MAX_COPY_ERRORS
+        ]
+        if len(candidates) == 1:
+            return f"[chunk:{candidates[0]}]"
+        return match.group(0)
+
+    return _LOOSE_CHUNK_REF_RE.sub(_resolve, answer_text)
 
 
 def extract_citations(answer_text: str, source_map: Dict[str, dict]) -> List[dict]:
@@ -1127,7 +1203,7 @@ def _retry_citation_repair(
             user_message=repair_user,
         )
         candidate_text, _ = extract_follow_up_questions(repaired_raw)
-        candidate_text = normalize_citation_markup(candidate_text).strip()
+        candidate_text = resolve_chunk_refs(normalize_citation_markup(candidate_text), source_map).strip()
         candidate_citations = extract_citations(candidate_text, source_map)
         if candidate_citations:
             return candidate_text, candidate_citations, True
@@ -1146,7 +1222,10 @@ def _finalize_answer_state(
     client: Optional[ollama.Client] = None,
     model_name: Optional[str] = None,
 ) -> dict:
-    answer_text = normalize_citation_markup(raw_answer_text).strip()
+    normalized_text = normalize_citation_markup(raw_answer_text)
+    answer_text = resolve_chunk_refs(normalized_text, source_map).strip()
+    if answer_text != normalized_text.strip():
+        log_event("citation_refs_resolved", span="postprocess", reason="abbreviated_or_unicode_chunk_ids")
     citations = extract_citations(answer_text, source_map)
     citation_retry_used = False
     citation_retry_succeeded = False
@@ -1435,6 +1514,31 @@ def generate_grounded_answer(
     )
 
 
+def _stream_answer_events(
+    stream: Iterable[dict],
+    heartbeat_sec: float = REASONING_HEARTBEAT_SEC,
+) -> Generator[dict, None, None]:
+    """Map Ollama chat stream chunks to answer events.
+
+    Only `message.content` becomes answer tokens. Reasoning models (e.g. gpt-oss)
+    stream their reasoning in `message.thinking`; it never enters the answer,
+    citations, or telemetry. While only reasoning arrives, emit a status event at
+    most every `heartbeat_sec` so clients do not mistake it for a stalled stream.
+    """
+    last_heartbeat = time.perf_counter()
+    for chunk in stream:
+        message = chunk.get("message", {}) or {}
+        token = message.get("content", "")
+        if token:
+            yield {"type": "token", "content": token}
+            continue
+        if message.get("thinking"):
+            now = time.perf_counter()
+            if now - last_heartbeat >= heartbeat_sec:
+                yield {"type": "status", "phase": "generating", "message": "Reasoning..."}
+                last_heartbeat = now
+
+
 def stream_grounded_answer(
     query: str,
     corpus: str,
@@ -1598,22 +1702,27 @@ def stream_grounded_answer(
         token_count = 0
         first_token_logged = False
         last_progress_time = time.perf_counter()
-        stream = ollama_client.chat(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            options={"num_ctx": config.ollama_num_ctx, "temperature": config.rag_generation_temperature},
-            keep_alive=config.ollama_keepalive,
-            stream=True,
-        )
-
-        for chunk in stream:
-            token = chunk.get("message", {}).get("content", "")
-            if token:
+        for attempt in range(EMPTY_GENERATION_RETRIES + 1):
+            if attempt:
+                log_event("generation_empty", span="stream", attempt=attempt)
+                yield {"type": "status", "phase": "generating", "message": "No answer text produced; retrying..."}
+            stream = ollama_client.chat(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                options=_answer_options(config.ollama_num_ctx, config.rag_generation_temperature),
+                keep_alive=config.ollama_keepalive,
+                stream=True,
+            )
+            for event in _stream_answer_events(stream):
+                if event["type"] != "token":
+                    yield event
+                    continue
+                token = event["content"]
                 full_response += token
-                yield {"type": "token", "content": token}
+                yield event
                 token_count += 1
                 if not first_token_logged:
                     log_event(
@@ -1631,6 +1740,10 @@ def stream_grounded_answer(
                         elapsed_ms=(now - generation_start) * 1000,
                     )
                     last_progress_time = now
+            if full_response.strip():
+                break
+        if not full_response.strip():
+            raise RuntimeError("Ollama returned an empty response.")
 
     generation_time_ms = (time.perf_counter() - generation_start) * 1000
     log.info("stream_generation_complete", ms=generation_time_ms)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import List
 import hashlib
 import re
@@ -25,7 +26,9 @@ logger = structlog.get_logger()
 EMBED_NORMALIZATION_VERSION = "v1"
 
 
+@lru_cache(maxsize=1)
 def load_embedding_model() -> SentenceTransformer:
+    # Cached: batch runs embed thousands of lessons in one process.
     config = get_config()
     model = SentenceTransformer(config.embedding_model)
     if torch.cuda.is_available():

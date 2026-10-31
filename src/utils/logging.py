@@ -1,6 +1,7 @@
 """Structured logging setup."""
 
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import structlog
 from structlog.stdlib import LoggerFactory, BoundLogger
@@ -47,7 +48,12 @@ def setup_logging(level: str = "INFO") -> None:
         isinstance(h, logging.FileHandler) and Path(h.baseFilename).resolve() == log_file
         for h in root_logger.handlers
     ):
-        file_handler = logging.FileHandler(log_file)
+        # Rotate so a long-running service cannot fill the disk.
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=int(config.log_max_bytes),
+            backupCount=int(config.log_backup_count),
+        )
         file_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)

@@ -243,6 +243,49 @@ def verify_qdrant_parity(corpus: str, session: Session, client: QdrantClient) ->
     }
 
 
+def _qdrant_point_ids(collection_name: str, client: QdrantClient, page_size: int = 5000) -> set[str]:
+    ids: set[str] = set()
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            limit=page_size,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+        ids.update(str(point.id) for point in points)
+        if offset is None:
+            return ids
+
+
+def verify_qdrant_id_parity(corpus: str, session: Session, client: QdrantClient, sample: int = 20) -> dict:
+    """Compare embedded child chunk IDs in PostgreSQL with Qdrant point IDs."""
+    corpus_id = session.execute(select(Corpus.id).where(Corpus.name == corpus)).scalar_one_or_none()
+    if corpus_id is None:
+        return {"status": "error", "error": f"Unknown corpus '{corpus}'"}
+    db_ids = {
+        str(row)
+        for row in session.execute(
+            select(TranscriptChildChunk.id)
+            .where(TranscriptChildChunk.corpus_id == corpus_id)
+            .where(TranscriptChildChunk.embedding.is_not(None))
+        ).scalars()
+    }
+    qdrant_ids = _qdrant_point_ids(f"{corpus}_chunks", client)
+    missing = sorted(db_ids - qdrant_ids)
+    extra = sorted(qdrant_ids - db_ids)
+    return {
+        "db_embedded_child_chunks": len(db_ids),
+        "qdrant_points": len(qdrant_ids),
+        "missing_in_qdrant": len(missing),
+        "extra_in_qdrant": len(extra),
+        "missing_sample": missing[:sample],
+        "extra_sample": extra[:sample],
+        "exact_match": not missing and not extra,
+    }
+
+
 def index_corpus_to_qdrant(corpus: str, session: Session) -> dict:
     setup_logging()
     log = logger.bind(function="index_corpus_to_qdrant", corpus=corpus)

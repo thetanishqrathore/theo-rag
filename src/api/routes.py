@@ -54,7 +54,7 @@ from src.generation.generate import (
 from src.retrieval.retrieve import retrieve_context_with_stats
 from src.retrieval.citation_utils import build_citation_path, lesson_label
 from src.utils.config import get_config
-from src.utils.ollama_client import get_ollama_client, warm_ollama_model, maybe_warm_ollama_model
+from src.utils.ollama_client import get_ollama_client, helper_num_ctx, warm_ollama_model, maybe_warm_ollama_model
 from src.utils.qdrant_client import get_qdrant_client
 from src.utils.logging import setup_logging
 from src.telemetry.rag_telemetry import (
@@ -93,6 +93,20 @@ def _get_generation_semaphore() -> tuple[threading.BoundedSemaphore, int]:
         _GENERATION_SEMAPHORE = threading.BoundedSemaphore(value=limit)
         _GENERATION_SEMAPHORE_LIMIT = limit
     return _GENERATION_SEMAPHORE, limit
+
+
+def allowed_models() -> list[str]:
+    config = get_config()
+    configured = [m.strip() for m in (config.api_allowed_models or "").split(",") if m.strip()]
+    return configured or [m for m in (config.ollama_model, config.secondary_ollama_model) if m]
+
+
+def resolve_model(requested: str | None) -> str:
+    """The model to use for a request; unlisted models are rejected (400)."""
+    model = requested or get_config().ollama_model
+    if model not in allowed_models():
+        raise HTTPException(status_code=400, detail=f"Model '{model}' is not available on this server.")
+    return model
 
 
 def validate_corpus(corpus: str) -> None:
@@ -391,6 +405,8 @@ def query(
         )
 
     validate_query(request.query)
+    # Before acquiring the generation slot, so a rejected model cannot leak it.
+    requested_model = resolve_model(request.model)
 
     semaphore, limit = _get_generation_semaphore()
     acquired = semaphore.acquire(blocking=False)
@@ -407,7 +423,7 @@ def query(
     retrieval_time_ms: float | None = None
     generation_time_ms: float | None = None
     post_time_ms: float | None = None
-    model_name: str | None = request.model or get_config().ollama_model
+    model_name: str | None = requested_model
 
     try:
         history_dicts = [{"role": turn.role, "content": turn.content} for turn in request.history] if request.history else None
@@ -679,6 +695,7 @@ def query_stream(
 
     try:
         validate_query(request.query)
+        resolve_model(request.model)
     except HTTPException as e:
         return _validation_error_response(e)
 
@@ -970,7 +987,9 @@ async def get_models() -> dict:
     try:
         ollama_client = get_ollama_client(timeout=10)
         models_response = ollama_client.list()
-        models = [model.get("name", model.get("model", "unknown")) for model in models_response.get("models", [])]
+        installed = [model.get("name", model.get("model", "unknown")) for model in models_response.get("models", [])]
+        allowed = allowed_models()
+        models = [name for name in installed if name in allowed]
         return {"models": models, "default": config.ollama_model, "secondary": config.secondary_ollama_model}
     except Exception as exc:  # noqa: BLE001
         log.error("models_fetch_failed", error=str(exc))
@@ -1040,7 +1059,7 @@ def enrich_citations(request: EnrichCitationsRequest) -> dict:
     log = logger.bind(function="api_enrich_citations")
     config = get_config()
 
-    model_name = request.model or config.secondary_ollama_model or config.ollama_model
+    model_name = resolve_model(request.model or config.secondary_ollama_model or None)
     if not request.citations:
         return {"model": model_name, "insights": {}}
 
@@ -1070,7 +1089,7 @@ def enrich_citations(request: EnrichCitationsRequest) -> dict:
             response = client.generate(
                 model=model_name,
                 prompt=prompt,
-                options={"num_ctx": 4096, "temperature": 0.2},
+                options={"num_ctx": helper_num_ctx(model_name, 4096), "temperature": 0.2},
                 keep_alive=config.ollama_keepalive,
             )
             raw_text = response.get("response", "")
@@ -1166,7 +1185,7 @@ def get_evidence(evidence_id: str, session: Session = Depends(get_db)) -> Eviden
                 DeanLesson.lesson_code,
             )
             .join(TranscriptChapter, TranscriptLesson.chapter_id == TranscriptChapter.id, isouter=True)
-            .join(TranscriptPart, TranscriptChapter.part_id == TranscriptPart.id, isouter=True)
+            .join(TranscriptPart, func.coalesce(TranscriptChapter.part_id, TranscriptLesson.part_id) == TranscriptPart.id, isouter=True)
             .join(Series, TranscriptPart.series_id == Series.id, isouter=True)
             .join(DeanLesson, TranscriptLesson.dean_lesson_id == DeanLesson.id, isouter=True)
             .join(DeanBook, DeanLesson.book_id == DeanBook.id, isouter=True)

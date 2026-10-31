@@ -1,148 +1,72 @@
-# Cloudflare Tunnel Deployment (Frontend + API) - End to End
+# Cloudflare Tunnel: public access
 
-This runbook publishes the app securely to the internet without opening inbound router ports.
+The site is published at `https://bibleai.raeonlabs.com` through a Cloudflare
+Tunnel: an outbound connection from this workstation to Cloudflare, so no
+router ports are opened and the machine's IP is never exposed. The API serves
+the web UI on the same origin, so one hostname covers both.
 
-## Architecture
-- `rag.raeonlabs.com` -> frontend (Vite preview/static server on `127.0.0.1:4173`)
-- `api.raeonlabs.com` -> FastAPI backend on `127.0.0.1:8000`
-- Cloudflare Zero Trust Access protects both hostnames.
-
-## 1) Prerequisites
-- Domain managed in Cloudflare.
-- `cloudflared` installed on your host.
-- Backend + frontend run locally.
-
-## 2) Harden backend CORS
-Set in `.env`:
-
-```bash
-API_ALLOWED_ORIGINS=https://rag.raeonlabs.com
+```
+browser ──HTTPS──▶ Cloudflare edge ──tunnel (outbound from workstation)──▶ cloudflared ──▶ 127.0.0.1:8000 (FastAPI + UI)
 ```
 
-## 3) Set frontend public API base
-Create `frontend/.env.production`:
+## What is published
+
+`ops/cloudflared/config.bibleai.yml` publishes only what the web UI uses:
+
+| Path | Published |
+| --- | --- |
+| `/`, `/assets/*`, client routes | yes (web UI) |
+| `/static/*` | yes (canonical evidence pages) |
+| `/api/query/stream`, `/api/health`, `/api/collections`, `/api/models`, `/api/evidence/<id>` | yes |
+| `/api/query` (blocking), `/api/models/pull`, `/api/models/keepalive`, `/api/enrich_citations`, `/api/stats`, `/docs`, `/redoc`, `/openapi.json` | **no** (404 at the tunnel) |
+
+The API also refuses any model not in `API_ALLOWED_MODELS` (default: the
+configured `OLLAMA_MODEL` / `SECONDARY_OLLAMA_MODEL`), so a visitor cannot load
+another installed model onto the shared GPU.
+
+## Setup (one time)
 
 ```bash
-VITE_API_BASE=https://api.raeonlabs.com
-```
+# 1. Install cloudflared (user space)
+curl -fsSL -o ~/.local/bin/cloudflared \
+  https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+chmod +x ~/.local/bin/cloudflared
 
-Build frontend:
-
-```bash
-cd frontend
-npm run build
-```
-
-Serve frontend build locally (private bind):
-
-```bash
-npm run preview -- --host 127.0.0.1 --port 4173
-```
-
-## 4) Run backend locally (private bind)
-
-```bash
-cd 
-.venv/bin/python -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000
-```
-
-## 5) Create Cloudflare tunnel
-
-Login:
-
-```bash
+# 2. Authorize the zone (opens a browser; pick raeonlabs.com)
 cloudflared tunnel login
+
+# 3. Create the tunnel and its DNS record
+cloudflared tunnel create theo-rag
+cloudflared tunnel route dns theo-rag bibleai.raeonlabs.com
+
+# 4. Write ~/.cloudflared/config.yml and install the boot-time service
+scripts/ops/install_tunnel.sh theo-rag bibleai.raeonlabs.com
 ```
 
-Create tunnel:
+Add the public origin to `API_ALLOWED_ORIGINS` in `.env` and restart the API
+(`systemctl --user restart theo-rag`).
 
-```bash
-cloudflared tunnel create rag-prod
-```
+## Operate
 
-Capture the tunnel UUID from output.
+| Task | Command |
+| --- | --- |
+| Status | `systemctl --user status theo-rag-tunnel` · `cloudflared tunnel info theo-rag` |
+| Logs | `journalctl --user -u theo-rag-tunnel -f` |
+| Take the site offline (local access unaffected) | `systemctl --user stop theo-rag-tunnel` |
+| Disable at boot | `systemctl --user disable theo-rag-tunnel` |
+| Remove completely | stop the service, delete the DNS record in Cloudflare, `cloudflared tunnel delete theo-rag` |
 
-## 6) Create tunnel config
-Write `~/.cloudflared/config.yml`:
+## Public access: know the limits
 
-```yaml
-tunnel: <TUNNEL_UUID>
-credentials-file: ~/.cloudflared/<TUNNEL_UUID>.json
-
-ingress:
-  - hostname: rag.raeonlabs.com
-    service: http://127.0.0.1:4173
-  - hostname: api.raeonlabs.com
-    service: http://127.0.0.1:8000
-  - service: http_status:404
-```
-
-## 7) Route DNS records through tunnel
-
-```bash
-cloudflared tunnel route dns rag-prod rag.raeonlabs.com
-cloudflared tunnel route dns rag-prod api.raeonlabs.com
-```
-
-## 8) Start tunnel
-
-```bash
-cloudflared tunnel run rag-prod
-```
-
-Optional service install (auto-start):
-
-```bash
-cloudflared service install
-```
-
-## 9) Add Cloudflare Access policies (critical)
-Cloudflare Dashboard -> Zero Trust -> Access -> Applications:
-
-Create two Self-hosted apps:
-1. `rag.raeonlabs.com`
-2. `api.raeonlabs.com`
-
-For each app:
-- Policy action: Allow
-- Include: your email / identity provider group
-- Optionally add country/IP restrictions
-
-## 10) Verification
-From an external network:
-
-```bash
-curl -I https://rag.raeonlabs.com
-curl -I https://api.raeonlabs.com/api/health
-```
-
-In browser:
-- open `https://rag.raeonlabs.com`
-- run a query and confirm no localhost calls in DevTools Network tab
-- confirm API requests go to `https://api.raeonlabs.com`
-
-## 11) Troubleshooting
-
-### UI loads, API fails
-- check `frontend/.env.production` points to public API domain.
-- rebuild frontend after env change.
-- check API Access policy includes your user.
-
-### CORS errors
-- ensure `API_ALLOWED_ORIGINS` includes exact UI origin (scheme + host).
-- restart backend after `.env` changes.
-
-### Tunnel up but hostname not reachable
-- verify DNS routes exist for both hostnames.
-- check `cloudflared tunnel list` and logs.
-
-### Backend reachable locally but not via tunnel
-- ensure backend binds `127.0.0.1:8000`.
-- confirm tunnel ingress points to same port.
-
-## 12) Security checklist
-- [ ] Backend bound to localhost only.
-- [ ] Qdrant/Postgres/Ollama not publicly exposed.
-- [ ] Access policy enabled on both frontend and API hostnames.
-- [ ] CORS limited to UI origin.
-- [ ] Strong account security (MFA) on Cloudflare.
+- **No login.** Anyone with the link can ask questions. To restrict access later,
+  add a Cloudflare Zero Trust Access application for `bibleai.raeonlabs.com`
+  (for example, email one-time PIN for an allowlist); no code change is needed.
+- **One answer at a time.** `RAG_GENERATION_MAX_CONCURRENCY=1`: a second
+  simultaneous visitor sees "Server is busy" and can retry. Answers take about
+  10–20 s each.
+- **Abuse protection** belongs at the edge: a Cloudflare WAF rate-limiting rule
+  on `/api/query/stream` (for example 10 requests per minute per IP) is
+  recommended.
+- Chats are stored only in each visitor's browser.
+- Streaming works through Cloudflare: reasoning heartbeats keep the connection
+  active well under Cloudflare's 100-second idle limit.

@@ -115,6 +115,8 @@ class TranscriptLesson(Base):
     source_file_id = Column(UUID(as_uuid=True), ForeignKey("source_files.id"), nullable=False)
     source_unit_key = Column(Text, nullable=False, server_default=text("'root'"))
     chapter_id = Column(Integer, ForeignKey("chapters.id"))
+    # Set even when chapter_id is NULL, so series/part attribution never depends on a chapter.
+    part_id = Column(Integer, ForeignKey("parts.id"))
     dean_lesson_id = Column(Integer, ForeignKey("dean_lessons.id"), unique=True)
     lesson_number = Column(Integer, nullable=False)
     title = Column(Text)

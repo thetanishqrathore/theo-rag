@@ -1,0 +1,69 @@
+name: ci
+
+# Deterministic checks only. GPU, model and corpus-dependent evaluation
+# (scripts/eval_suite.py against a live API) runs on the workstation.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: raguser
+          POSTGRES_PASSWORD: dev_password
+          POSTGRES_DB: theology_rag
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U raguser -d theology_rag"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://raguser:dev_password@127.0.0.1:5432/theology_rag
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install (locked)
+        run: uv sync --locked --extra dev
+      - name: Fresh schema bootstrap + migrations
+        run: uv run python scripts/migrate.py --bootstrap
+      - name: Second migration run is a no-op
+        run: |
+          out="$(uv run python scripts/migrate.py)"
+          echo "$out"
+          grep -q "^0 migration(s) applied" <<<"$out"
+      - name: Schema matches ORM
+        run: uv run python scripts/migrate.py --check
+      - name: Benchmark dataset validation
+        run: |
+          mkdir -p eval/reports
+          uv run python scripts/eval_validate_benchmark.py \
+            --input eval/benchmark/v1_cases.jsonl \
+            --schema eval/benchmark/v1_schema.json \
+            --stats-output eval/reports/benchmark_v1_stats.json
+      - name: Compile
+        run: uv run python -m compileall -q src scripts
+      - name: Tests
+        run: uv run pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

@@ -15,7 +15,7 @@ import structlog
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import SearchParams
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from sqlalchemy import and_, or_, select, text as sql_text
+from sqlalchemy import and_, func, or_, select, text as sql_text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import ProgrammingError
 import torch
@@ -39,8 +39,8 @@ from src.utils.logging import setup_logging
 from src.observability.logging import log_event
 from src.observability.timer import SpanTimer
 from src.utils.qdrant_client import get_qdrant_client
-from src.utils.ollama_client import get_ollama_client
-from src.utils.text import STOPWORDS
+from src.utils.ollama_client import get_ollama_client, helper_num_ctx
+from src.utils.text import STOPWORDS, normalize_search_text
 
 logger = structlog.get_logger()
 DEFINITION_PATTERN = re.compile(r"\bmeans\b|\bdefined as\b|\bin other words\b", re.IGNORECASE)
@@ -78,10 +78,10 @@ def rewrite_query(query: str, history: list[dict] | None = None) -> str:
         response = client.generate(
             model=model_name,
             prompt=prompt,
-            options={"num_ctx": 2048, "temperature": 0.0},
+            options={"num_ctx": helper_num_ctx(model_name, 2048), "temperature": 0.0},
             keep_alive=config.ollama_keepalive,
         )
-        rewritten = response.get("response", "").strip()
+        rewritten = normalize_search_text(response.get("response", "")).strip()
         if rewritten and 5 < len(rewritten) < 500:
             log_event("query_rewritten", span="retrieval", original=query, rewritten=rewritten)
             return rewritten
@@ -935,7 +935,7 @@ def fetch_parent_chunks(parent_ids: List[str], session: Session) -> List[dict]:
         )
         .join(TranscriptLesson, TranscriptParentChunk.lesson_id == TranscriptLesson.id)
         .join(TranscriptChapter, TranscriptLesson.chapter_id == TranscriptChapter.id, isouter=True)
-        .join(TranscriptPart, TranscriptChapter.part_id == TranscriptPart.id, isouter=True)
+        .join(TranscriptPart, func.coalesce(TranscriptChapter.part_id, TranscriptLesson.part_id) == TranscriptPart.id, isouter=True)
         .join(Series, TranscriptPart.series_id == Series.id, isouter=True)
         .where(TranscriptParentChunk.id.in_(parent_ids))
     )
@@ -1084,7 +1084,9 @@ def retrieve_context_with_stats(
     setup_logging()
     log = logger.bind(function="retrieve_context", corpus=corpus)
     config = get_config()
-    retrieval_query = rewrite_query(query, history=history)
+    # Normalized again here because the rewrite may be disabled or fail and fall
+    # back to the raw user query.
+    retrieval_query = normalize_search_text(rewrite_query(query, history=history)).strip() or query
     mode = _resolve_retrieval_mode(corpus, retrieval_mode, config)
     ef_search = config.qdrant_ef_search_fast if mode == "fast" else config.qdrant_ef_search_deep
     search_k_fast = max(1, int(config.rag_query_search_k_fast))

@@ -28,26 +28,29 @@ export function ModelSelector({ models, selectedModel, onSelectModel, status = '
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // Focus search input when dropdown opens
-  useEffect(() => {
-    if (open) {
-      requestAnimationFrame(() => searchInputRef.current?.focus())
-      // Set active index to selected model
-      const idx = filtered.findIndex((m) => m === selectedModel)
-      setActiveIndex(Math.max(0, idx))
-    }
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-
   const filtered = useMemo(() => {
     if (!query.trim()) return models
     const lower = query.trim().toLowerCase()
     return models.filter((model) => model.toLowerCase().includes(lower))
   }, [models, query])
 
-  // Reset active index when filtered list changes
+  // Focus search input when dropdown opens
   useEffect(() => {
+    if (open) {
+      requestAnimationFrame(() => searchInputRef.current?.focus())
+    }
+  }, [open])
+
+  // Opening always starts from an empty query, so the list is the full model list.
+  const openDropdown = useCallback(() => {
+    setActiveIndex(Math.max(0, models.findIndex((m) => m === selectedModel)))
+    setOpen(true)
+  }, [models, selectedModel])
+
+  const updateQuery = useCallback((value: string) => {
+    setQuery(value)
     setActiveIndex(0)
-  }, [filtered.length])
+  }, [])
 
   const closeDropdown = useCallback((focusTrigger = false) => {
     setOpen(false)
@@ -107,13 +110,13 @@ export function ModelSelector({ models, selectedModel, onSelectModel, status = '
   const handleTriggerKeyDown = useCallback((event: React.KeyboardEvent) => {
     if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !open) {
       event.preventDefault()
-      setOpen(true)
+      openDropdown()
     }
     if (event.key === 'Escape' && open) {
       event.preventDefault()
       closeDropdown(true)
     }
-  }, [open, closeDropdown])
+  }, [open, openDropdown, closeDropdown])
 
   const label = selectedModel || (status === 'loading' ? 'Loading models…' : 'Select model')
 
@@ -122,7 +125,7 @@ export function ModelSelector({ models, selectedModel, onSelectModel, status = '
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => (open ? closeDropdown() : openDropdown())}
         onKeyDown={handleTriggerKeyDown}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -144,7 +147,7 @@ export function ModelSelector({ models, selectedModel, onSelectModel, status = '
             <input
               ref={searchInputRef}
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => updateQuery(e.target.value)}
               placeholder="Search models…"
               className="w-full bg-transparent text-xs text-gray-200 placeholder:text-gray-500 focus:outline-none"
               aria-label="Search models"

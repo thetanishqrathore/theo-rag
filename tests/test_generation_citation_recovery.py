@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import types
 
-ROOT = Path("")
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -268,3 +268,48 @@ def test_finalize_state_refusal_never_automaps(monkeypatch) -> None:
     assert final_state["grounding_reason"] == "refusal"
     assert final_state["citation_automap_used"] is False
     assert final_state["citation_automap_succeeded"] is False
+
+
+def test_every_cited_source_gets_a_card_beyond_three() -> None:
+    ids = [f"0000000{i}-1111-2222-3333-444444444444" for i in range(5)]
+    chunks = [
+        _search_result(child_chunk_id=cid, parent_chunk_id=f"p{i}", child_text=f"passage {i}", rerank_score=0.9)
+        for i, cid in enumerate(ids)
+    ]
+    payload = gen.build_grounding_citation_payloads(
+        parent_chunks=chunks,
+        used_evidence_ids=ids,
+        answer_mode="confident",
+        refusal=False,
+    )
+    assert [card["evidence_id"] for card in payload["citations"]] == ids
+    assert payload["num_citations_emitted"] == 5
+    assert payload["num_citations_matched"] == 5
+
+
+def test_uncited_narrow_fallback_cards_stay_bounded() -> None:
+    chunks = [
+        _search_result(
+            child_chunk_id=f"0000000{i}-1111-2222-3333-444444444444",
+            parent_chunk_id=f"p{i}",
+            child_text=f"passage {i}",
+            rerank_score=0.9,
+        )
+        for i in range(6)
+    ]
+    payload = gen.build_grounding_citation_payloads(
+        parent_chunks=chunks, used_evidence_ids=[], answer_mode="narrow", refusal=False
+    )
+    assert len(payload["citations"]) == 3
+    assert all(card["context_only"] for card in payload["citations"])
+
+
+def test_fullwidth_bracket_citations_are_recognized() -> None:
+    cid = "3f052b2b-6e8c-4477-9b0d-4237fc0dfcb0"
+    text = f"A claim【chunk:{cid}】. Bare id【{cid}】. Prefix【chunk:3f052b2b】."
+    normalized = gen.normalize_citation_markup(text)
+    assert normalized.count(f"[chunk:{cid}]") == 2
+    assert "[chunk:3f052b2b]" in normalized
+    assert "【" not in normalized
+    resolved = gen.resolve_chunk_refs(normalized, {cid: {}})
+    assert resolved.count(f"[chunk:{cid}]") == 3

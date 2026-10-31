@@ -192,6 +192,7 @@ def ingest_course_notes(pdf_path: Path, tag: str, session: Session | None = None
             session=session,
             source_file_id=source_file_id,
             chapter_id=chapter_id,
+            part_id=part_id,
             lesson_number=lesson_number,
             metadata={
                 "lesson_title": lesson_title,

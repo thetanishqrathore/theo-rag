@@ -74,7 +74,7 @@ class AppConfig(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "gpt-oss:120b"
     secondary_ollama_model: str = ""
-    ollama_timeout: int = 180
+    ollama_timeout: int = 900
     ollama_keepalive: str = "5m"
     ollama_warm_on_startup: bool = True
     ollama_num_ctx: int = Field(default=32768, validation_alias="OLLAMA_NUM_CTX")
@@ -88,6 +88,8 @@ class AppConfig(BaseSettings):
     canonical_path: str = "data/canonical"
     log_path: str = "data/logs"
     log_level: str = "INFO"
+    log_max_bytes: int = Field(default=50 * 1024 * 1024, validation_alias="LOG_MAX_BYTES")
+    log_backup_count: int = Field(default=5, validation_alias="LOG_BACKUP_COUNT")
     corpus_name: CorpusId = "clough"
     default_tag: str = "transcripts"
     transcript_lesson_overrides: str = "{}"
@@ -131,6 +133,12 @@ class AppConfig(BaseSettings):
     validation_profile_threshold_overrides: str = Field(
         default="{}",
         validation_alias="VALIDATION_PROFILE_THRESHOLD_OVERRIDES",
+    )
+    # Reviewed per-source exceptions: {"<source filename>": ["<check name>", ...]}.
+    # Listed checks are recorded as accepted exceptions instead of failing the lesson.
+    validation_accepted_exceptions: str = Field(
+        default="{}",
+        validation_alias="VALIDATION_ACCEPTED_EXCEPTIONS",
     )
     transcript_citation_include_chapter: bool = Field(
         default=True, validation_alias="TRANSCRIPT_CITATION_INCLUDE_CHAPTER"
@@ -254,6 +262,9 @@ class AppConfig(BaseSettings):
     rag_dynamic_rerank_boost_factor: float = Field(default=1.5, validation_alias="RAG_DYNAMIC_RERANK_BOOST_FACTOR")
     rag_rerank_cache_size: int = Field(default=200000, validation_alias="RAG_RERANK_CACHE_SIZE")
     rag_generation_temperature: float = Field(default=0.1, validation_alias="RAG_GENERATION_TEMPERATURE")
+    # Output-token cap per answer (reasoning + content). Bounds a runaway reasoning
+    # loop, observed once with gpt-oss filling the whole 32k context (2m50s, no answer).
+    rag_generation_max_tokens: int = Field(default=8192, validation_alias="RAG_GENERATION_MAX_TOKENS")
     rag_hierarchy_boost_enabled: bool = Field(default=True, validation_alias="RAG_HIERARCHY_BOOST_ENABLED")
     rag_hierarchy_boost_weight: float = Field(default=0.12, validation_alias="RAG_HIERARCHY_BOOST_WEIGHT")
     rag_hierarchy_min_coverage: float = Field(default=0.25, validation_alias="RAG_HIERARCHY_MIN_COVERAGE")
@@ -326,6 +337,13 @@ class AppConfig(BaseSettings):
         validation_alias="RAG_CITATION_AUTOMAP_MAX_CITES_PER_SENTENCE",
     )
     api_allowed_origins: str = Field(default="http://localhost:5173", validation_alias="API_ALLOWED_ORIGINS")
+    # Models clients may request (comma-separated). Empty = OLLAMA_MODEL plus
+    # SECONDARY_OLLAMA_MODEL. Other installed Ollama models are never offered or used,
+    # so a public visitor cannot load an unrelated model onto the shared GPU.
+    api_allowed_models: str = Field(default="", validation_alias="API_ALLOWED_MODELS")
+    # Built frontend (npm run build) served by the API at "/". Relative paths resolve
+    # against the repository root; empty disables frontend serving.
+    frontend_dist_path: str = Field(default="frontend/dist", validation_alias="FRONTEND_DIST_PATH")
 
     class Config:
         env_file = ".env"

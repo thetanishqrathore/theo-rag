@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 STOPWORDS = {
     "a",
     "about",
@@ -128,3 +130,31 @@ STOPWORDS = {
     "yourself",
     "yourselves",
 }
+
+
+# Typographic characters some models (e.g. gpt-oss) emit in place of ASCII.
+# Corpus text uses ASCII hyphens/spaces, so lexical search would miss terms like
+# "faith‑rest" (U+2011) unless model-written queries are folded back.
+_SEARCH_TEXT_TRANSLATION = str.maketrans(
+    {
+        "‐": "-",  # hyphen
+        "‑": "-",  # non-breaking hyphen
+        "‒": "-",  # figure dash
+        "−": "-",  # minus sign
+        " ": " ",  # no-break space
+        " ": " ",  # narrow no-break space
+        " ": " ",  # figure space
+        " ": " ",  # thin space
+    }
+)
+
+
+# C0/C1 control characters (NUL included) are never search content; PostgreSQL
+# rejects NUL in text parameters outright. Observed: gpt-oss returned a rewrite
+# ending in "\x00", which aborted a request.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def normalize_search_text(text: str) -> str:
+    """Fold model-emitted typography to ASCII and drop control characters for retrieval."""
+    return _CONTROL_CHARS_RE.sub(" ", text.translate(_SEARCH_TEXT_TRANSLATION))

@@ -1,18 +1,26 @@
-version: "3.8"
+name: theo-rag
+
+# Infrastructure for theo-rag. All ports bind to 127.0.0.1 only; the API is the
+# single LAN-facing service. Data lives in project-scoped named volumes
+# (theo-rag_postgres_data, theo-rag_qdrant_data).
+#
+# On an EMPTY postgres volume, scripts/init.sql runs once via the entrypoint.
+# Apply migrations afterwards with: python scripts/migrate.py
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
-    container_name: theology_postgres
+    # Pinned by digest: the pg16 tag moves; dumps/volumes were produced with this build.
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+    container_name: theo_rag_postgres
     environment:
       POSTGRES_USER: raguser
       POSTGRES_PASSWORD: dev_password
       POSTGRES_DB: theology_rag
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U raguser -d theology_rag"]
       interval: 10s
@@ -22,20 +30,21 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.7.0
-    container_name: theology_qdrant
+    container_name: theo_rag_qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
   adminer:
     image: adminer
-    container_name: theology_adminer
-    restart: always
+    container_name: theo_rag_adminer
+    profiles: ["tools"]
+    restart: unless-stopped
     ports:
-      - "8085:8080"
+      - "127.0.0.1:8085:8080"
     depends_on:
       - postgres
     environment:

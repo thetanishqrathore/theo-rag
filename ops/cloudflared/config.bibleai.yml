@@ -1,0 +1,21 @@
+# Cloudflare Tunnel for the public site (single origin: the API serves the UI).
+# Install: copy to ~/.cloudflared/config.yml and set <TUNNEL_UUID> / <USER>,
+# or run scripts/ops/install_tunnel.sh. Only what the web UI uses is published;
+# admin and unused endpoints return 404 at Cloudflare's edge and never reach the app.
+tunnel: <TUNNEL_UUID>
+credentials-file: /home/<USER>/.cloudflared/<TUNNEL_UUID>.json
+
+ingress:
+  # API endpoints used by the browser UI.
+  - hostname: bibleai.raeonlabs.com
+    path: ^/api/(query/stream|health|collections|models|evidence/[0-9a-fA-F-]+)$
+    service: http://127.0.0.1:8000
+  # Everything else under /api (models/pull, models/keepalive, enrich_citations,
+  # blocking /api/query, stats) and the OpenAPI docs stay private.
+  - hostname: bibleai.raeonlabs.com
+    path: ^/(api/|docs|redoc|openapi\.json)
+    service: http_status:404
+  # Web UI, its assets, and /static canonical evidence pages.
+  - hostname: bibleai.raeonlabs.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404

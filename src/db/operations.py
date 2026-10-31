@@ -149,11 +149,13 @@ def insert_transcript_lesson(
     metadata: dict,
     source_unit_key: str = "root",
     dean_lesson_id: int | None = None,
+    part_id: int | None = None,
 ) -> int:
     lesson = TranscriptLesson(
         source_file_id=source_file_id,
         source_unit_key=source_unit_key,
         chapter_id=chapter_id,
+        part_id=part_id,
         dean_lesson_id=dean_lesson_id,
         lesson_number=lesson_number,
         title=metadata.get("lesson_title"),

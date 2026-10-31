@@ -7,6 +7,7 @@ import json
 import math
 import re
 import statistics
+import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -16,6 +17,12 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # Telemetry join imports src.*; running as `python scripts/eval_suite.py` puts
+    # only scripts/ on sys.path.
+    sys.path.insert(0, str(ROOT))
 
 
 def _avg(values: list[float]) -> float | None:
@@ -343,8 +350,13 @@ def _run_stream(
         "contract": contract,
     }
 
-    if contract["contract_errors"] and contract["error_payload"] is not None:
+    # A stream fails on any contract error, and on a server error event that ends
+    # it without a final event (previously both had to hold, so an error-only
+    # stream counted as a success).
+    if contract["contract_errors"]:
         return EndpointResult(False, status_code, json.dumps(contract["contract_errors"]), elapsed_ms, payload_out)
+    if contract["error_payload"] is not None and not contract["final_received"]:
+        return EndpointResult(False, status_code, json.dumps(contract["error_payload"]), elapsed_ms, payload_out)
 
     return EndpointResult(True, status_code, None, elapsed_ms, payload_out)
 
@@ -578,13 +590,16 @@ def _score_case(
 
     hierarchy_presence_rate = _hierarchy_presence_rate_from_citations(all_citations)
 
-    evidence_success = 0
-    for item in evidence_results.values():
-        if item.get("ok"):
-            evidence_success += 1
+    # Share of returned evidence IDs (from both endpoints) that resolve via
+    # /api/evidence. The denominator used to be one endpoint's citation count while
+    # the numerator counted IDs from both, producing rates above 1.
+    evidence_success = sum(1 for item in evidence_results.values() if item.get("ok"))
+    evidence_failed_ids = sorted(eid for eid, item in evidence_results.items() if not item.get("ok"))
     evidence_support_rate = None
-    if citation_count > 0:
-        evidence_support_rate = evidence_success / citation_count
+    if evidence_results:
+        evidence_support_rate = evidence_success / len(evidence_results)
+    elif citation_count > 0:
+        evidence_support_rate = 0.0
     elif must_refuse:
         evidence_support_rate = 1.0
 
@@ -621,6 +636,9 @@ def _score_case(
         "hierarchy_metadata_presence_rate": hierarchy_presence_rate,
         "anchor_recall_at_k": anchor_recall,
         "evidence_support_rate": evidence_support_rate,
+        "evidence_ids_checked": len(evidence_results),
+        "evidence_failed_ids": evidence_failed_ids,
+        "answer_text": answer_text,
         "refusal_correct": refusal_correct,
         "mode_correct": mode_correct,
         "citation_floor_pass": citation_floor_pass,

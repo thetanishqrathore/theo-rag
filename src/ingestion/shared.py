@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 from pathlib import Path
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 DEAN_YEAR_FILE_RE = re.compile(r"^(?P<year>\d{4})-[^-]+-(?P<code>\d+[A-Za-z]?)$", flags=re.IGNORECASE)
 DEAN_SIMPLE_FILE_RE = re.compile(r"^[^-]+-(?P<code>\d+[A-Za-z]?)$", flags=re.IGNORECASE)
 DEAN_SUFFIX_FILE_RE = re.compile(r"^[A-Za-z]+(?P<code>\d+)$", flags=re.IGNORECASE)
+_TOPICAL_FORMAT_DIRS = {"html", "htm", "pdf", "doc", "docx", "rtf"}
 DEAN_TRAILING_DIGITS_RE = re.compile(r"(?P<digits>\d+)(?!.*\d)")
 
 
@@ -63,8 +65,49 @@ def resolve_dean_book(path: Path, source_root: str, collection: str) -> tuple[st
         return book_slug, book_slug.replace("_", " "), {"testament": testament}
     if len(rel_parts) < 2:
         raise ValueError(f"Expected topic/file under {source_root}: {path}")
+    # Topical trees may group topics by file format first (html/<Topic>/file,
+    # pdf/<Topic>/file); the topic folder is the book, not the format folder.
+    if len(rel_parts) >= 3 and rel_parts[0].lower() in _TOPICAL_FORMAT_DIRS:
+        rel_parts = rel_parts[1:]
     book_slug = rel_parts[0]
     return book_slug, book_slug.replace("_", " "), {}
+
+
+def load_dean_lesson_overrides() -> dict[str, dict[str, Any]]:
+    """Parse DEAN_LESSON_OVERRIDES.
+
+    Values are either a plain lesson number or an object
+    {"lesson_number": 14, "basis": "inferred_passage_order", "reason": "..."}.
+    Each entry is returned as {"lesson_number": int, "basis": str, "reason": str|None}.
+    """
+    from src.utils.config import get_config
+
+    try:
+        raw = json.loads(get_config().dean_lesson_overrides or "{}")
+    except json.JSONDecodeError:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        entry = value if isinstance(value, dict) else {"lesson_number": value}
+        try:
+            number = int(entry["lesson_number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        result[str(key)] = {
+            "lesson_number": number,
+            "basis": str(entry.get("basis") or "manual"),
+            "reason": entry.get("reason"),
+        }
+    return result
+
+
+def dean_lesson_override(*keys: str) -> dict[str, Any] | None:
+    """Override entry from DEAN_LESSON_OVERRIDES for the first matching key, if any."""
+    overrides = load_dean_lesson_overrides()
+    for key in keys:
+        if key in overrides:
+            return overrides[key]
+    return None
 
 
 def parse_dean_lesson(stem: str) -> tuple[int | None, str | None]:

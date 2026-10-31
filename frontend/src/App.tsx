@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import type { EvidencePreview } from './lib/api'
 import { useChatStore } from './store/chatStore'
+import { buildSessionsExport, parseSessionsExport } from './lib/storage'
 import { Sidebar } from './components/Sidebar'
 import { InputBar } from './components/InputBar'
 import { MessageBubble } from './components/MessageBubble'
@@ -88,6 +89,7 @@ export default function App() {
     deleteSession,
     renameSession,
     togglePinSession,
+    importSessions,
     sendMessage,
     cancelStream,
     health,
@@ -195,6 +197,26 @@ export default function App() {
     setCopyToast({ id: Date.now(), message, tone })
   }
 
+  const exportSessions = () => {
+    const blob = new Blob([buildSessionsExport(sessions)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `theo-rag-chats-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+    showCopyToast(`Exported ${sessions.length} chat${sessions.length === 1 ? '' : 's'}`)
+  }
+
+  const importSessionsFile = async (file: File) => {
+    try {
+      const { imported, kept } = importSessions(parseSessionsExport(await file.text()))
+      showCopyToast(`Imported ${imported} chat${imported === 1 ? '' : 's'} (${kept} kept)`)
+    } catch (err) {
+      showCopyToast(err instanceof Error ? err.message : 'Import failed', 'error')
+    }
+  }
+
   const sendWithStickyScroll = (query: string, corpus: string, model?: string) => {
     forceSticky()
     sendMessage(query, corpus, model)
@@ -284,6 +306,8 @@ export default function App() {
           setRenameTarget({ id, title: existing?.title || '' })
         }}
         onTogglePinSession={togglePinSession}
+        onExportSessions={exportSessions}
+        onImportSessions={importSessionsFile}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
         statusBadges={sidebarStatus}

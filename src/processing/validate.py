@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, List, Tuple
 
@@ -22,6 +23,7 @@ from src.processing.patterns import MARKDOWN_LEAK_RE, PAGE_MARKER_RE
 from src.processing.semantic_review import run_shadow_semantic_review
 from src.processing.structured_nodes import is_dean_node_lesson, load_dean_structured_nodes
 from src.utils.config import get_config
+from src.utils.provenance import stamp as provenance_stamp
 from src.utils.logging import setup_logging
 
 logger = structlog.get_logger()
@@ -37,7 +39,7 @@ def _is_copyright_footer_artifact(paragraph: TranscriptParagraph, total_paragrap
         return True
     if paragraph.paragraph_index >= max(0, total_paragraphs - 5) and words <= 220:
         return True
-    if re.search(r"(?:©|copyright)\s+[A-Za-z].{0,120}\b(?:19|20)\d{2}\b", text, re.IGNORECASE):
+    if re.search(r"(?:©|copyright)\s*[A-Za-z].{0,120}\b(?:19|20)\d{2}\b", text, re.IGNORECASE):
         return True
     return False
 
@@ -129,12 +131,19 @@ def check_paragraph_length_bounds(paragraphs: List[TranscriptParagraph]) -> Tupl
     return True, f"Max paragraph: {longest.word_count} words"
 
 
+# Paragraphs at or below this length are ignored by the duplicate-content check.
+_DUPLICATE_MIN_WORDS = 12
+
+
 def check_reading_flow(paragraphs: List[TranscriptParagraph], profile: str = "default") -> Tuple[bool, str]:
     thresholds = _profile_thresholds(profile)
     texts = [p.content.strip() for p in paragraphs if p.content]
     if not texts:
         return False, "No text content found"
-    duplicate_ratio = (len(texts) - len(set(texts))) / len(texts)
+    # Short lines (outline headings repeated in the body, slide titles) recur by
+    # design; only substantive paragraphs count toward duplicated content.
+    substantive = [text for text in texts if len(text.split()) > _DUPLICATE_MIN_WORDS]
+    duplicate_ratio = (len(substantive) - len(set(substantive))) / len(texts)
     if duplicate_ratio > float(thresholds["dup_warn"]):
         return False, "Duplicate paragraph content detected"
     leak_markers = 0
@@ -471,7 +480,49 @@ def _transcript_metadata_reasons(lesson: TranscriptLesson, session: Session) -> 
     return reasons
 
 
-def validate_lesson_structure(lesson_id: int, session: Session) -> dict:
+def _apply_accepted_exceptions(lesson: TranscriptLesson, session: Session, checks: dict) -> list[dict]:
+    """Mark reviewed, configured check failures for this exact source as accepted.
+
+    VALIDATION_ACCEPTED_EXCEPTIONS maps a source filename to
+    {"checks": [...], "sha256": "<source checksum>", "reason": "...", "reviewer": "..."}.
+    An exception applies only while the source file still has that checksum, so
+    an edited source is validated normally again. The original failure message
+    is preserved in the check detail and in the returned record.
+    """
+    try:
+        configured = json.loads(get_config().validation_accepted_exceptions or "{}")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(configured, dict) or not configured:
+        return []
+    row = session.execute(
+        select(SourceFile.filename, SourceFile.checksum).where(SourceFile.id == lesson.source_file_id)
+    ).first()
+    if row is None:
+        return []
+    entry = configured.get(row[0])
+    if not isinstance(entry, dict) or entry.get("sha256") != row[1]:
+        return []
+    accepted = []
+    for name in sorted(set(entry.get("checks") or [])):
+        if name in checks and not checks[name][0]:
+            original = checks[name][1]
+            checks[name] = (True, f"accepted exception (reviewed): {original}")
+            accepted.append(
+                {
+                    "check": name,
+                    "original_message": original,
+                    "reason": entry.get("reason"),
+                    "reviewer": entry.get("reviewer"),
+                    "source_sha256": row[1],
+                }
+            )
+    return accepted
+
+
+def validate_lesson_structure(lesson_id: int, session: Session, update_status: bool = True) -> dict:
+    """Validate a structured lesson. update_status=False re-checks an already
+    processed lesson and saves the report without touching its status."""
     setup_logging()
     log = logger.bind(function="validate_lesson_structure", lesson_id=lesson_id)
 
@@ -516,6 +567,8 @@ def validate_lesson_structure(lesson_id: int, session: Session) -> dict:
         checks["heading_list_coherence"] = check_heading_list_coherence(structured_nodes)
         checks["table_normalization"] = check_table_normalization(structured_nodes)
 
+    accepted_exceptions = _apply_accepted_exceptions(lesson, session, checks)
+
     passed = sum(1 for val in checks.values() if val[0])
     total = len(checks)
     scores = compute_validation_scores(paragraphs, profile=profile, nodes=structured_nodes or None)
@@ -534,6 +587,15 @@ def validate_lesson_structure(lesson_id: int, session: Session) -> dict:
         "llm_semantic_review": shadow_review,
         "details": {k: {"passed": v[0], "message": v[1]} for k, v in checks.items()},
     }
+    if accepted_exceptions:
+        validation_report["accepted_exceptions"] = accepted_exceptions
+    validation_report["provenance"] = provenance_stamp()
+
+    if not update_status:
+        lesson.validation_report = validation_report
+        session.commit()
+        status = "validated" if passed == total else "failed"
+        return {"status": status, "checks": validation_report["details"], "message": f"report-only revalidation: {status}"}
 
     if passed == total:
         lesson.status = "validated"

@@ -404,11 +404,13 @@ def create_html_document_from_nodes(
     return "\n".join(html)
 
 
-def generate_canonical_html(lesson_id: int, session: Session) -> Path:
+def generate_canonical_html(lesson_id: int, session: Session, require_validated: bool = True) -> Path:
+    """Write canonical HTML. require_validated=False regenerates it for an already
+    chunked/embedded lesson (e.g. after a metadata repair); content is unchanged."""
     lesson = session.execute(select(TranscriptLesson).where(TranscriptLesson.id == lesson_id)).scalar_one_or_none()
     if not lesson:
         raise ValueError(f"Lesson not found: {lesson_id}")
-    if lesson.status != "validated":
+    if require_validated and lesson.status != "validated":
         raise ValueError(f"Lesson {lesson_id} is not validated")
 
     paragraphs = (
@@ -431,6 +433,8 @@ def generate_canonical_html(lesson_id: int, session: Session) -> Path:
         chapter = session.execute(select(TranscriptChapter).where(TranscriptChapter.id == lesson.chapter_id)).scalar_one_or_none()
         if chapter:
             part = session.execute(select(TranscriptPart).where(TranscriptPart.id == chapter.part_id)).scalar_one_or_none()
+    if part is None and lesson.part_id:
+        part = session.execute(select(TranscriptPart).where(TranscriptPart.id == lesson.part_id)).scalar_one_or_none()
     if part:
         series = session.execute(select(Series).where(Series.id == part.series_id)).scalar_one_or_none()
     if lesson.dean_lesson_id:

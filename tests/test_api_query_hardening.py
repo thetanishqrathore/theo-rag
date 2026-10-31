@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 
-ROOT = Path("")
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -216,6 +216,8 @@ def test_query_accepts_flat_citation_cards_and_tracks_matched_rows(monkeypatch) 
         "get_config",
         lambda: SimpleNamespace(
             ollama_model="mistral",
+            secondary_ollama_model="",
+            api_allowed_models="",
             ollama_keepalive="5m",
             embedding_model="embed-model",
             reranker_model="rerank-model",
