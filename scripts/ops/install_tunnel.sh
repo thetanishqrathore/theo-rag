@@ -18,7 +18,11 @@ HOSTNAME_PUBLIC="${2:-bibleai.raeonlabs.com}"
 CLOUDFLARED="$(command -v cloudflared || echo "$HOME/.local/bin/cloudflared")"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
-UUID="$("$CLOUDFLARED" tunnel info "$TUNNEL" 2>/dev/null | sed -n 's/^ID:[[:space:]]*//p' | head -1)"
+# Accept a tunnel name or UUID (`tunnel info` prints no ID for idle tunnels).
+UUID="$("$CLOUDFLARED" tunnel list --output json 2>/dev/null | python3 -c '
+import json, sys
+want = sys.argv[1]
+print(next((t["id"] for t in json.load(sys.stdin) if want in (t["name"], t["id"])), ""))' "$TUNNEL")"
 [[ -z "$UUID" ]] && UUID="$TUNNEL"
 [[ -f "$HOME/.cloudflared/$UUID.json" ]] || { echo "missing credentials ~/.cloudflared/$UUID.json" >&2; exit 1; }
 
