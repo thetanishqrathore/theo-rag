@@ -22,3 +22,6 @@ logs/
 
 # Local agent / tooling settings
 .claude/
+
+# Evaluation run artifacts (contain corpus text and query logs)
+eval/reports/
