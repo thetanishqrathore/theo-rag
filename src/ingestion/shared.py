@@ -73,20 +73,40 @@ def resolve_dean_book(path: Path, source_root: str, collection: str) -> tuple[st
     return book_slug, book_slug.replace("_", " "), {}
 
 
-def dean_lesson_override(*keys: str) -> int | None:
-    """Lesson number from DEAN_LESSON_OVERRIDES for the first matching key, if any."""
+def load_dean_lesson_overrides() -> dict[str, dict[str, Any]]:
+    """Parse DEAN_LESSON_OVERRIDES.
+
+    Values are either a plain lesson number or an object
+    {"lesson_number": 14, "basis": "inferred_passage_order", "reason": "..."}.
+    Each entry is returned as {"lesson_number": int, "basis": str, "reason": str|None}.
+    """
     from src.utils.config import get_config
 
     try:
-        overrides = json.loads(get_config().dean_lesson_overrides or "{}")
+        raw = json.loads(get_config().dean_lesson_overrides or "{}")
     except json.JSONDecodeError:
-        return None
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        entry = value if isinstance(value, dict) else {"lesson_number": value}
+        try:
+            number = int(entry["lesson_number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        result[str(key)] = {
+            "lesson_number": number,
+            "basis": str(entry.get("basis") or "manual"),
+            "reason": entry.get("reason"),
+        }
+    return result
+
+
+def dean_lesson_override(*keys: str) -> dict[str, Any] | None:
+    """Override entry from DEAN_LESSON_OVERRIDES for the first matching key, if any."""
+    overrides = load_dean_lesson_overrides()
     for key in keys:
         if key in overrides:
-            try:
-                return int(overrides[key])
-            except (TypeError, ValueError):
-                return None
+            return overrides[key]
     return None
 
 

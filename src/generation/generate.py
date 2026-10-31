@@ -644,9 +644,12 @@ def build_grounding_citation_payloads(
                 resolved_chunks.append(chunk)
                 seen.add(chunk_id)
 
+    # Every source the answer cites gets a card, so each [chunk:] reference in the
+    # answer resolves for the client; max_cards only bounds the context-only
+    # fallback cards shown for an uncited narrow answer.
     citation_cards = [
         _build_citation_card_payload(chunk, force_context_only=bool(fallback_reason))
-        for chunk in resolved_chunks[:max_cards]
+        for chunk in resolved_chunks
     ]
     return {
         "citations": citation_cards,

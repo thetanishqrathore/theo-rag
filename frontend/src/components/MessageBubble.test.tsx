@@ -203,6 +203,8 @@ describe('MessageBubble', () => {
     expect(screen.getByRole('button', { name: /citation 1/i })).not.toBeNull()
     expect(container.textContent).not.toMatch(/\[\s*1?\s*\]/)
     expect(container.textContent).not.toContain('chunk:')
+    // The reference without a source card stays visible as unresolved.
+    expect(screen.getByLabelText('Unresolved citation')).not.toBeNull()
   })
 
   it('keeps markdown structure (headings, lists, paragraphs) in answers', () => {
@@ -216,5 +218,24 @@ describe('MessageBubble', () => {
     expect(container.querySelector('h3')?.textContent).toBe('Definition')
     expect(container.querySelectorAll('li')).toHaveLength(2)
     expect(container.querySelectorAll('p').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('renders a chip for each of five cited sources', () => {
+    const ids = [0, 1, 2, 3, 4].map((i) => `0000000${i}-1111-2222-3333-444444444444`)
+    render(
+      <MessageBubble
+        message={buildAssistantMessage({
+          content: ids.map((id, i) => `Claim ${i} [chunk:${id}].`).join(' '),
+          evidence: ids.map((id, i) => ({
+            evidence_id: id, parent_id: `p${i}`, label: `Source ${i + 1}`, path: `path-${i}`, is_primary: true, context_only: false,
+          })),
+          used_evidence_ids: ids,
+        })}
+      />
+    )
+    for (const n of [1, 2, 3, 4, 5]) {
+      expect(screen.getByRole('button', { name: new RegExp(`citation ${n}\\b`, 'i') })).not.toBeNull()
+    }
+    expect(screen.queryByLabelText('Unresolved citation')).toBeNull()
   })
 })

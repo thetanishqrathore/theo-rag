@@ -231,9 +231,9 @@ def ingest_dean_pdf(pdf_path: Path, tag: str, session: Session | None = None) ->
         profile, profile_confidence, quality_flags = detect_topical_pdf_profile(top_text, rel_path)
         title, title_source = extract_title_with_source(stem, top_text, pdf_metadata)
         speaker, speaker_source = extract_speaker_with_source(top_text, get_config().dean_default_speaker)
-        override_number = dean_lesson_override(rel_path, pdf_path.name, stem)
-        if override_number is not None:
-            lesson_number, lesson_code, lesson_number_source = override_number, stem, "override"
+        override = dean_lesson_override(rel_path, pdf_path.name, stem)
+        if override is not None:
+            lesson_number, lesson_code, lesson_number_source = override["lesson_number"], stem, "override"
         else:
             lesson_number, lesson_code, lesson_number_source = extract_lesson_number_with_source(
                 stem, top_text, session, book_id
@@ -273,6 +273,7 @@ def ingest_dean_pdf(pdf_path: Path, tag: str, session: Session | None = None) ->
                 "title_source": title_source,
                 "speaker_source": speaker_source,
                 "lesson_number_source": lesson_number_source,
+                **({"lesson_number_override": override} if override is not None else {}),
                 "date_source": date_source,
                 "quality_flags": quality_flags,
                 "engine_candidates": [],

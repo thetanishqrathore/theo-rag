@@ -6,7 +6,7 @@ from typing import List, Any
 import re
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.db.models import (
@@ -173,7 +173,7 @@ def _fetch_source_metadata(lesson: TranscriptLesson, session: Session, source_ty
                 Series.title,
             )
             .join(TranscriptChapter, TranscriptLesson.chapter_id == TranscriptChapter.id, isouter=True)
-            .join(TranscriptPart, TranscriptChapter.part_id == TranscriptPart.id, isouter=True)
+            .join(TranscriptPart, func.coalesce(TranscriptChapter.part_id, TranscriptLesson.part_id) == TranscriptPart.id, isouter=True)
             .join(Series, TranscriptPart.series_id == Series.id, isouter=True)
         ).first()
         if not row:
@@ -195,7 +195,7 @@ def _fetch_source_metadata(lesson: TranscriptLesson, session: Session, source_ty
                 TranscriptChapter.title,
             )
             .join(TranscriptChapter, TranscriptLesson.chapter_id == TranscriptChapter.id, isouter=True)
-            .join(TranscriptPart, TranscriptChapter.part_id == TranscriptPart.id, isouter=True)
+            .join(TranscriptPart, func.coalesce(TranscriptChapter.part_id, TranscriptLesson.part_id) == TranscriptPart.id, isouter=True)
             .join(Series, TranscriptPart.series_id == Series.id, isouter=True)
         ).first()
         if not row:

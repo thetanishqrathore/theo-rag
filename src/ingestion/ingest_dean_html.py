@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from src.ingestion.shared import (
     ensure_raw_copy,
     mark_source_file_completed,
     parse_dean_lesson as _parse_lesson,
+    dean_lesson_override,
     next_dean_lesson_number,
     resolve_dean_book as _resolve_book,
     resolve_dean_collection as _resolve_collection,
@@ -67,21 +67,6 @@ def _extract_title(path: Path) -> str | None:
     return _WS_RE.sub(" ", raw).strip() or None
 
 
-def _load_overrides() -> dict[str, int]:
-    config = get_config()
-    try:
-        raw = json.loads(config.dean_lesson_overrides or "{}")
-    except json.JSONDecodeError:
-        return {}
-    result: dict[str, int] = {}
-    for key, value in raw.items():
-        try:
-            result[str(key)] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return result
-
-
 def ingest_dean_html(html_path: Path, tag: str, session: Session | None = None) -> dict:
     """Ingest one Dean HTML source and create linked Dean/transcript lesson rows."""
     setup_logging()
@@ -96,7 +81,6 @@ def ingest_dean_html(html_path: Path, tag: str, session: Session | None = None) 
     collection, source_root = _resolve_collection(html_path)
     rel_path = _resolve_rel_path(html_path, source_root)
     filename = html_path.name
-    overrides = _load_overrides()
     stem = html_path.stem
     log = logger.bind(function="ingest_dean_html", corpus="dean", tag=tag, filename=filename, collection=collection)
 
@@ -119,14 +103,13 @@ def ingest_dean_html(html_path: Path, tag: str, session: Session | None = None) 
 
         lesson_number, lesson_code = _parse_lesson(stem)
         lesson_number_source = "filename"
-        override_key_candidates = [rel_path, filename, stem]
-        for key in override_key_candidates:
-            if key in overrides:
-                lesson_number = overrides[key]
-                if not lesson_code:
-                    lesson_code = stem
-                lesson_number_source = "override"
-                break
+        override = dean_lesson_override(rel_path, filename, stem)
+        if override is not None:
+            # lesson_code keeps the source's own label; lesson_number is the assigned order.
+            lesson_number = override["lesson_number"]
+            if not lesson_code:
+                lesson_code = stem
+            lesson_number_source = "override"
         if lesson_number is None and collection == "bible_books":
             raise ValueError(f"Unable to derive lesson_number for '{filename}'. Add override in DEAN_LESSON_OVERRIDES.")
 
@@ -182,6 +165,7 @@ def ingest_dean_html(html_path: Path, tag: str, session: Session | None = None) 
                 "title_source": "title_tag_or_first_p" if title else "none",
                 "speaker_source": "default",
                 "lesson_number_source": lesson_number_source,
+                **({"lesson_number_override": override} if override is not None else {}),
                 "date_source": "none",
                 "quality_flags": [],
                 "engine_candidates": [],

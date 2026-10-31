@@ -153,6 +153,7 @@ def ingest_transcript_doc(doc_path: Path, tag: str, session: Session | None = No
             chapter_id=chapter_id,
             lesson_number=int(lesson_number),
             metadata=metadata,
+            part_id=part_id,
         )
         mark_source_file_completed(session, source_file_id)
         session.commit()

@@ -364,3 +364,19 @@ def test_accepted_validation_exceptions_are_scoped_and_recorded(monkeypatch) -> 
     assert checks["heading_list_coherence"][0] is True
     assert "6 abrupt heading depth jumps" in checks["heading_list_coherence"][1]
     assert checks["reading_flow"][0] is False  # unlisted checks still fail
+
+
+def test_dean_lesson_overrides_keep_basis_and_reason(monkeypatch) -> None:
+    import src.utils.config as config_module
+    from src.ingestion.shared import dean_lesson_override
+
+    cfg = SimpleNamespace(dean_lesson_overrides=(
+        '{"Jno015.htm": {"lesson_number": 14, "basis": "inferred_passage_order", "reason": "John 1:19-28"},'
+        ' "Legacy.htm": 7}'
+    ))
+    monkeypatch.setattr(config_module, "get_config", lambda: cfg)
+    assert dean_lesson_override("New_Test/John/Jno015.htm", "Jno015.htm") == {
+        "lesson_number": 14, "basis": "inferred_passage_order", "reason": "John 1:19-28",
+    }
+    assert dean_lesson_override("Legacy.htm") == {"lesson_number": 7, "basis": "manual", "reason": None}
+    assert dean_lesson_override("Other.htm") is None

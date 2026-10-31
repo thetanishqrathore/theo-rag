@@ -15,7 +15,7 @@ import structlog
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import SearchParams
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from sqlalchemy import and_, or_, select, text as sql_text
+from sqlalchemy import and_, func, or_, select, text as sql_text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import ProgrammingError
 import torch
@@ -935,7 +935,7 @@ def fetch_parent_chunks(parent_ids: List[str], session: Session) -> List[dict]:
         )
         .join(TranscriptLesson, TranscriptParentChunk.lesson_id == TranscriptLesson.id)
         .join(TranscriptChapter, TranscriptLesson.chapter_id == TranscriptChapter.id, isouter=True)
-        .join(TranscriptPart, TranscriptChapter.part_id == TranscriptPart.id, isouter=True)
+        .join(TranscriptPart, func.coalesce(TranscriptChapter.part_id, TranscriptLesson.part_id) == TranscriptPart.id, isouter=True)
         .join(Series, TranscriptPart.series_id == Series.id, isouter=True)
         .where(TranscriptParentChunk.id.in_(parent_ids))
     )

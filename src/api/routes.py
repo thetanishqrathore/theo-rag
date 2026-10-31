@@ -1166,7 +1166,7 @@ def get_evidence(evidence_id: str, session: Session = Depends(get_db)) -> Eviden
                 DeanLesson.lesson_code,
             )
             .join(TranscriptChapter, TranscriptLesson.chapter_id == TranscriptChapter.id, isouter=True)
-            .join(TranscriptPart, TranscriptChapter.part_id == TranscriptPart.id, isouter=True)
+            .join(TranscriptPart, func.coalesce(TranscriptChapter.part_id, TranscriptLesson.part_id) == TranscriptPart.id, isouter=True)
             .join(Series, TranscriptPart.series_id == Series.id, isouter=True)
             .join(DeanLesson, TranscriptLesson.dean_lesson_id == DeanLesson.id, isouter=True)
             .join(DeanBook, DeanLesson.book_id == DeanBook.id, isouter=True)

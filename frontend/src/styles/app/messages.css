@@ -538,6 +538,12 @@
   transform: translateY(-1px);
 }
 
+.citation-chip.unresolved {
+  cursor: help;
+  opacity: 0.6;
+  border-style: dashed;
+}
+
 .citation-chip.context-only {
   border-style: dashed;
   opacity: 0.7;

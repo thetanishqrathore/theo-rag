@@ -268,3 +268,37 @@ def test_finalize_state_refusal_never_automaps(monkeypatch) -> None:
     assert final_state["grounding_reason"] == "refusal"
     assert final_state["citation_automap_used"] is False
     assert final_state["citation_automap_succeeded"] is False
+
+
+def test_every_cited_source_gets_a_card_beyond_three() -> None:
+    ids = [f"0000000{i}-1111-2222-3333-444444444444" for i in range(5)]
+    chunks = [
+        _search_result(child_chunk_id=cid, parent_chunk_id=f"p{i}", child_text=f"passage {i}", rerank_score=0.9)
+        for i, cid in enumerate(ids)
+    ]
+    payload = gen.build_grounding_citation_payloads(
+        parent_chunks=chunks,
+        used_evidence_ids=ids,
+        answer_mode="confident",
+        refusal=False,
+    )
+    assert [card["evidence_id"] for card in payload["citations"]] == ids
+    assert payload["num_citations_emitted"] == 5
+    assert payload["num_citations_matched"] == 5
+
+
+def test_uncited_narrow_fallback_cards_stay_bounded() -> None:
+    chunks = [
+        _search_result(
+            child_chunk_id=f"0000000{i}-1111-2222-3333-444444444444",
+            parent_chunk_id=f"p{i}",
+            child_text=f"passage {i}",
+            rerank_score=0.9,
+        )
+        for i in range(6)
+    ]
+    payload = gen.build_grounding_citation_payloads(
+        parent_chunks=chunks, used_evidence_ids=[], answer_mode="narrow", refusal=False
+    )
+    assert len(payload["citations"]) == 3
+    assert all(card["context_only"] for card in payload["citations"])

@@ -63,16 +63,17 @@ const transformCitationsToLinks = (
     if (/^\d+$/.test(ref)) {
       const ordinal = Number(ref)
       const evidenceId = evidenceByOrdinal.get(ordinal)
-      return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : ''
+      return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : `[?](#unresolved-${ordinal})`
     }
     const lookupId = ref.toLowerCase()
     const index = indexMap.get(lookupId) ?? 0
-    return index ? `[${index}](#cite-${lookupId})` : ''
+    // A reference with no matching source stays visible as an unresolved marker.
+    return index ? `[${index}](#cite-${lookupId})` : `[?](#unresolved-${lookupId})`
   })
   rendered = rendered.replace(/\[SOURCE\s+(\d{1,3})\]/gi, (_match, rawNum) => {
     const ordinal = Number(rawNum)
     const evidenceId = evidenceByOrdinal.get(ordinal)
-    return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : ''
+    return evidenceId ? `[${ordinal}](#cite-${evidenceId})` : `[?](#unresolved-${ordinal})`
   })
   return rendered
     .replace(/\[(?:chunk|SOURCE)[^\]]*\]/gi, '')
@@ -181,6 +182,17 @@ export function MessageBubble({
             contextOnly={info?.contextOnly}
             label={info?.tooltipLabel}
           />
+        )
+      }
+      if (href && href.startsWith('#unresolved-')) {
+        return (
+          <span
+            className="citation-chip unresolved"
+            title="This citation could not be matched to a returned source"
+            aria-label="Unresolved citation"
+          >
+            ?
+          </span>
         )
       }
       if (!href) return <span>{children}</span>
