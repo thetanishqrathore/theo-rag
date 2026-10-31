@@ -805,6 +805,37 @@ def _append_citation_item(citations: List[dict], source_item: dict) -> None:
     )
 
 
+_LOOSE_CHUNK_REF_RE = re.compile(r"\[chunk:([0-9a-fA-F\-\u2010\u2011\u2012]{8,})\]", re.IGNORECASE)
+_MIN_CHUNK_PREFIX_LEN = 8
+
+
+def resolve_chunk_refs(answer_text: str, source_map: Dict[str, dict]) -> str:
+    """Rewrite [chunk:...] refs that unambiguously name provided evidence to full IDs.
+
+    Some models (observed with gpt-oss:120b) abbreviate the evidence UUIDs they
+    were given to their first 8 hex characters, or write the UUID hyphens as
+    U+2011. A ref is rewritten only when it matches exactly one evidence ID in
+    this answer's source map; unknown or ambiguous refs are left untouched and
+    stay invalid downstream.
+    """
+    keys = [str(key) for key in source_map.keys() if key != "__order__"]
+    if not answer_text or not keys:
+        return answer_text
+    by_lower = {key.lower(): key for key in keys}
+
+    def _resolve(match: re.Match) -> str:
+        ref = match.group(1).translate({0x2010: "-", 0x2011: "-", 0x2012: "-"}).lower()
+        if ref in by_lower:
+            return f"[chunk:{by_lower[ref]}]"
+        if len(ref) >= _MIN_CHUNK_PREFIX_LEN:
+            candidates = [key for lower, key in by_lower.items() if lower.startswith(ref)]
+            if len(candidates) == 1:
+                return f"[chunk:{candidates[0]}]"
+        return match.group(0)
+
+    return _LOOSE_CHUNK_REF_RE.sub(_resolve, answer_text)
+
+
 def extract_citations(answer_text: str, source_map: Dict[str, dict]) -> List[dict]:
     config = get_config()
     normalized_text = normalize_citation_markup(answer_text)
@@ -1129,7 +1160,7 @@ def _retry_citation_repair(
             user_message=repair_user,
         )
         candidate_text, _ = extract_follow_up_questions(repaired_raw)
-        candidate_text = normalize_citation_markup(candidate_text).strip()
+        candidate_text = resolve_chunk_refs(normalize_citation_markup(candidate_text), source_map).strip()
         candidate_citations = extract_citations(candidate_text, source_map)
         if candidate_citations:
             return candidate_text, candidate_citations, True
@@ -1148,7 +1179,10 @@ def _finalize_answer_state(
     client: Optional[ollama.Client] = None,
     model_name: Optional[str] = None,
 ) -> dict:
-    answer_text = normalize_citation_markup(raw_answer_text).strip()
+    normalized_text = normalize_citation_markup(raw_answer_text)
+    answer_text = resolve_chunk_refs(normalized_text, source_map).strip()
+    if answer_text != normalized_text.strip():
+        log_event("citation_refs_resolved", span="postprocess", reason="abbreviated_or_unicode_chunk_ids")
     citations = extract_citations(answer_text, source_map)
     citation_retry_used = False
     citation_retry_succeeded = False
