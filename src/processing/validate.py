@@ -23,6 +23,7 @@ from src.processing.patterns import MARKDOWN_LEAK_RE, PAGE_MARKER_RE
 from src.processing.semantic_review import run_shadow_semantic_review
 from src.processing.structured_nodes import is_dean_node_lesson, load_dean_structured_nodes
 from src.utils.config import get_config
+from src.utils.provenance import stamp as provenance_stamp
 from src.utils.logging import setup_logging
 
 logger = structlog.get_logger()
@@ -479,12 +480,14 @@ def _transcript_metadata_reasons(lesson: TranscriptLesson, session: Session) -> 
     return reasons
 
 
-def _apply_accepted_exceptions(lesson: TranscriptLesson, session: Session, checks: dict) -> list[str]:
-    """Mark reviewed, configured check failures for this source as accepted.
+def _apply_accepted_exceptions(lesson: TranscriptLesson, session: Session, checks: dict) -> list[dict]:
+    """Mark reviewed, configured check failures for this exact source as accepted.
 
-    VALIDATION_ACCEPTED_EXCEPTIONS maps a source filename to check names that a
-    human reviewed and accepted (e.g. noisy heading depths in otherwise correct
-    text). The original failure message is kept in the check detail.
+    VALIDATION_ACCEPTED_EXCEPTIONS maps a source filename to
+    {"checks": [...], "sha256": "<source checksum>", "reason": "...", "reviewer": "..."}.
+    An exception applies only while the source file still has that checksum, so
+    an edited source is validated normally again. The original failure message
+    is preserved in the check detail and in the returned record.
     """
     try:
         configured = json.loads(get_config().validation_accepted_exceptions or "{}")
@@ -492,19 +495,34 @@ def _apply_accepted_exceptions(lesson: TranscriptLesson, session: Session, check
         return []
     if not isinstance(configured, dict) or not configured:
         return []
-    filename = session.execute(
-        select(SourceFile.filename).where(SourceFile.id == lesson.source_file_id)
-    ).scalar_one_or_none()
-    allowed = set(configured.get(filename or "", []))
+    row = session.execute(
+        select(SourceFile.filename, SourceFile.checksum).where(SourceFile.id == lesson.source_file_id)
+    ).first()
+    if row is None:
+        return []
+    entry = configured.get(row[0])
+    if not isinstance(entry, dict) or entry.get("sha256") != row[1]:
+        return []
     accepted = []
-    for name in sorted(allowed):
+    for name in sorted(set(entry.get("checks") or [])):
         if name in checks and not checks[name][0]:
-            checks[name] = (True, f"accepted exception (reviewed): {checks[name][1]}")
-            accepted.append(name)
+            original = checks[name][1]
+            checks[name] = (True, f"accepted exception (reviewed): {original}")
+            accepted.append(
+                {
+                    "check": name,
+                    "original_message": original,
+                    "reason": entry.get("reason"),
+                    "reviewer": entry.get("reviewer"),
+                    "source_sha256": row[1],
+                }
+            )
     return accepted
 
 
-def validate_lesson_structure(lesson_id: int, session: Session) -> dict:
+def validate_lesson_structure(lesson_id: int, session: Session, update_status: bool = True) -> dict:
+    """Validate a structured lesson. update_status=False re-checks an already
+    processed lesson and saves the report without touching its status."""
     setup_logging()
     log = logger.bind(function="validate_lesson_structure", lesson_id=lesson_id)
 
@@ -571,6 +589,13 @@ def validate_lesson_structure(lesson_id: int, session: Session) -> dict:
     }
     if accepted_exceptions:
         validation_report["accepted_exceptions"] = accepted_exceptions
+    validation_report["provenance"] = provenance_stamp()
+
+    if not update_status:
+        lesson.validation_report = validation_report
+        session.commit()
+        status = "validated" if passed == total else "failed"
+        return {"status": status, "checks": validation_report["details"], "message": f"report-only revalidation: {status}"}
 
     if passed == total:
         lesson.status = "validated"

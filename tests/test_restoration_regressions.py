@@ -347,23 +347,35 @@ def test_reading_flow_ignores_repeated_outline_headings() -> None:
 def test_accepted_validation_exceptions_are_scoped_and_recorded(monkeypatch) -> None:
     import src.processing.validate as v
 
-    class FakeSession:
-        def execute(self, _stmt):
-            return SimpleNamespace(scalar_one_or_none=lambda: "2008-Chafer-HistoryOfDoctrine-Paper-026.pdf")
+    def session_for(checksum):
+        class FakeSession:
+            def execute(self, _stmt):
+                return SimpleNamespace(first=lambda: ("2008-Chafer-HistoryOfDoctrine-Paper-026.pdf", checksum))
+        return FakeSession()
 
-    monkeypatch.setattr(v, "get_config", lambda: SimpleNamespace(
-        validation_accepted_exceptions='{"2008-Chafer-HistoryOfDoctrine-Paper-026.pdf": ["heading_list_coherence"]}'
-    ))
-    checks = {
-        "heading_list_coherence": (False, "6 abrupt heading depth jumps"),
-        "reading_flow": (False, "Duplicate paragraph content detected"),
-    }
-    accepted = v._apply_accepted_exceptions(SimpleNamespace(source_file_id="x"), FakeSession(), checks)
+    monkeypatch.setattr(v, "get_config", lambda: SimpleNamespace(validation_accepted_exceptions=(
+        '{"2008-Chafer-HistoryOfDoctrine-Paper-026.pdf": {"checks": ["heading_list_coherence"],'
+        ' "sha256": "abc", "reason": "noisy Marker heading depths", "reviewer": "restoration"}}'
+    )))
 
-    assert accepted == ["heading_list_coherence"]
+    def fresh_checks():
+        return {
+            "heading_list_coherence": (False, "6 abrupt heading depth jumps"),
+            "reading_flow": (False, "Duplicate paragraph content detected"),
+        }
+
+    checks = fresh_checks()
+    accepted = v._apply_accepted_exceptions(SimpleNamespace(source_file_id="x"), session_for("abc"), checks)
+    assert [a["check"] for a in accepted] == ["heading_list_coherence"]
+    assert accepted[0]["original_message"] == "6 abrupt heading depth jumps"
+    assert accepted[0]["reviewer"] == "restoration"
     assert checks["heading_list_coherence"][0] is True
-    assert "6 abrupt heading depth jumps" in checks["heading_list_coherence"][1]
     assert checks["reading_flow"][0] is False  # unlisted checks still fail
+
+    # An edited source (different checksum) gets no exception.
+    checks = fresh_checks()
+    assert v._apply_accepted_exceptions(SimpleNamespace(source_file_id="x"), session_for("changed"), checks) == []
+    assert checks["heading_list_coherence"][0] is False
 
 
 def test_dean_lesson_overrides_keep_basis_and_reason(monkeypatch) -> None:
