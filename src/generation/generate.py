@@ -379,6 +379,16 @@ def evaluate_sufficiency(query: str, parent_chunks: List[SearchResult], corpus: 
     return "narrow", metrics
 
 
+def _answer_options(num_ctx: int, temperature: float) -> dict:
+    # num_predict is a sampling option: changing it does not reload the model.
+    return {"num_ctx": num_ctx, "temperature": temperature, "num_predict": int(get_config().rag_generation_max_tokens)}
+
+
+# A generation that returns no answer content (reasoning only, or a runaway
+# reasoning loop cut off by num_predict) is retried this many times.
+EMPTY_GENERATION_RETRIES = 1
+
+
 def generate_answer(
     prompt: str,
     client: ollama.Client,
@@ -391,25 +401,36 @@ def generate_answer(
 ) -> str:
     if num_ctx is None:
         num_ctx = get_config().ollama_num_ctx
-    if system_message is not None and user_message is not None:
-        response = client.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message},
-            ],
-            options={"num_ctx": num_ctx, "temperature": temperature},
-            keep_alive=keep_alive,
+    text = ""
+    for attempt in range(EMPTY_GENERATION_RETRIES + 1):
+        if system_message is not None and user_message is not None:
+            response = client.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message},
+                ],
+                options=_answer_options(num_ctx, temperature),
+                keep_alive=keep_alive,
+            )
+            text = response.get("message", {}).get("content", "")
+        else:
+            response = client.generate(
+                model=model,
+                prompt=prompt,
+                options=_answer_options(num_ctx, temperature),
+                keep_alive=keep_alive,
+            )
+            text = response.get("response", "")
+        if text.strip():
+            break
+        log_event(
+            "generation_empty",
+            span="generation",
+            attempt=attempt + 1,
+            done_reason=response.get("done_reason"),
+            eval_count=response.get("eval_count"),
         )
-        text = response.get("message", {}).get("content", "")
-    else:
-        response = client.generate(
-            model=model,
-            prompt=prompt,
-            options={"num_ctx": num_ctx, "temperature": temperature},
-            keep_alive=keep_alive,
-        )
-        text = response.get("response", "")
     if not text.strip():
         raise RuntimeError("Ollama returned an empty response.")
     return text.strip()
@@ -1662,23 +1683,25 @@ def stream_grounded_answer(
         token_count = 0
         first_token_logged = False
         last_progress_time = time.perf_counter()
-        stream = ollama_client.chat(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            options={"num_ctx": config.ollama_num_ctx, "temperature": config.rag_generation_temperature},
-            keep_alive=config.ollama_keepalive,
-            stream=True,
-        )
-
-        for event in _stream_answer_events(stream):
-            if event["type"] != "token":
-                yield event
-                continue
-            token = event["content"]
-            if token:
+        for attempt in range(EMPTY_GENERATION_RETRIES + 1):
+            if attempt:
+                log_event("generation_empty", span="stream", attempt=attempt)
+                yield {"type": "status", "phase": "generating", "message": "No answer text produced; retrying..."}
+            stream = ollama_client.chat(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                options=_answer_options(config.ollama_num_ctx, config.rag_generation_temperature),
+                keep_alive=config.ollama_keepalive,
+                stream=True,
+            )
+            for event in _stream_answer_events(stream):
+                if event["type"] != "token":
+                    yield event
+                    continue
+                token = event["content"]
                 full_response += token
                 yield event
                 token_count += 1
@@ -1698,6 +1721,10 @@ def stream_grounded_answer(
                         elapsed_ms=(now - generation_start) * 1000,
                     )
                     last_progress_time = now
+            if full_response.strip():
+                break
+        if not full_response.strip():
+            raise RuntimeError("Ollama returned an empty response.")
 
     generation_time_ms = (time.perf_counter() - generation_start) * 1000
     log.info("stream_generation_complete", ms=generation_time_ms)

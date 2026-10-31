@@ -392,3 +392,87 @@ def test_dean_lesson_overrides_keep_basis_and_reason(monkeypatch) -> None:
     }
     assert dean_lesson_override("Legacy.htm") == {"lesson_number": 7, "basis": "manual", "reason": None}
     assert dean_lesson_override("Other.htm") is None
+
+
+def test_normalize_search_text_drops_control_characters() -> None:
+    from src.utils.text import normalize_search_text
+
+    # Observed gpt-oss rewrite: PostgreSQL rejects NUL in text parameters.
+    cleaned = normalize_search_text("resurrection hope citation\x00")
+    assert "\x00" not in cleaned
+    assert cleaned.strip() == "resurrection hope citation"
+    assert normalize_search_text("line\nbreak\ttab") == "line\nbreak\ttab"
+
+
+def test_generate_answer_retries_an_empty_generation_and_caps_tokens(monkeypatch) -> None:
+    import src.generation.generate as gen
+
+    monkeypatch.setattr(gen, "get_config", lambda: SimpleNamespace(ollama_num_ctx=32768, rag_generation_max_tokens=8192))
+    calls: list[dict] = []
+
+    class FakeClient:
+        def chat(self, **kwargs):
+            calls.append(kwargs)
+            content = "" if len(calls) == 1 else "Grounded answer [chunk:abc]."
+            return {"message": {"content": content, "thinking": "..."}, "done_reason": "length", "eval_count": 8192}
+
+    text = gen.generate_answer("", FakeClient(), "gpt-oss:120b", system_message="s", user_message="u")
+    assert text == "Grounded answer [chunk:abc]."
+    assert len(calls) == 2
+    assert calls[0]["options"]["num_predict"] == 8192
+
+
+def test_generate_answer_still_fails_after_repeated_empty_generations(monkeypatch) -> None:
+    import src.generation.generate as gen
+
+    monkeypatch.setattr(gen, "get_config", lambda: SimpleNamespace(ollama_num_ctx=32768, rag_generation_max_tokens=8192))
+
+    class EmptyClient:
+        def chat(self, **kwargs):
+            return {"message": {"content": ""}, "done_reason": "length"}
+
+    with pytest.raises(RuntimeError, match="empty response"):
+        gen.generate_answer("", EmptyClient(), "gpt-oss:120b", system_message="s", user_message="u")
+
+
+def test_eval_suite_counts_error_only_stream_as_failure(monkeypatch) -> None:
+    es = _load_script("eval_suite")
+    error_only = 'event: error\ndata: {"error": "boom", "error_type": "internal_error"}\n\n'
+
+    class FakeStream:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def iter_text(self):
+            yield error_only
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            return FakeStream()
+
+    result = es._run_stream(FakeClient(), "http://x", {}, {})
+    assert result.ok is False
+    assert "boom" in (result.error or "")
+
+
+def test_eval_evidence_support_rate_is_a_rate() -> None:
+    es = _load_script("eval_suite")
+    case = es.EvalCase({
+        "id": "c1", "corpus": "clough", "query": "q", "class_tags": ["definition"], "label_tier": "gold",
+        "expected_mode": "confident", "must_refuse": False, "min_citations": 1, "gold_anchors": [],
+        "silver_rules": {},
+    })
+    query_result = es.EndpointResult(True, 200, None, 10.0, {
+        "answer": "A [chunk:a]. B [chunk:b].", "answer_mode": "confident", "refusal": False,
+        "citations": [{"evidence_id": "a"}, {"evidence_id": "b"}],
+    })
+    # Stream cited different evidence: four IDs checked in total, one fails to resolve.
+    evidence = {"a": {"ok": True}, "b": {"ok": True}, "c": {"ok": True}, "d": {"ok": False}}
+    row = es._score_case(case, query_result, None, evidence)
+    assert row["evidence_support_rate"] == 0.75
+    assert row["evidence_failed_ids"] == ["d"]

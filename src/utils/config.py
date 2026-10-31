@@ -262,6 +262,9 @@ class AppConfig(BaseSettings):
     rag_dynamic_rerank_boost_factor: float = Field(default=1.5, validation_alias="RAG_DYNAMIC_RERANK_BOOST_FACTOR")
     rag_rerank_cache_size: int = Field(default=200000, validation_alias="RAG_RERANK_CACHE_SIZE")
     rag_generation_temperature: float = Field(default=0.1, validation_alias="RAG_GENERATION_TEMPERATURE")
+    # Output-token cap per answer (reasoning + content). Bounds a runaway reasoning
+    # loop, observed once with gpt-oss filling the whole 32k context (2m50s, no answer).
+    rag_generation_max_tokens: int = Field(default=8192, validation_alias="RAG_GENERATION_MAX_TOKENS")
     rag_hierarchy_boost_enabled: bool = Field(default=True, validation_alias="RAG_HIERARCHY_BOOST_ENABLED")
     rag_hierarchy_boost_weight: float = Field(default=0.12, validation_alias="RAG_HIERARCHY_BOOST_WEIGHT")
     rag_hierarchy_min_coverage: float = Field(default=0.25, validation_alias="RAG_HIERARCHY_MIN_COVERAGE")

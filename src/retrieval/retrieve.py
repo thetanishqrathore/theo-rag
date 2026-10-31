@@ -1084,7 +1084,9 @@ def retrieve_context_with_stats(
     setup_logging()
     log = logger.bind(function="retrieve_context", corpus=corpus)
     config = get_config()
-    retrieval_query = rewrite_query(query, history=history)
+    # Normalized again here because the rewrite may be disabled or fail and fall
+    # back to the raw user query.
+    retrieval_query = normalize_search_text(rewrite_query(query, history=history)).strip() or query
     mode = _resolve_retrieval_mode(corpus, retrieval_mode, config)
     ef_search = config.qdrant_ef_search_fast if mode == "fast" else config.qdrant_ef_search_deep
     search_k_fast = max(1, int(config.rag_query_search_k_fast))
