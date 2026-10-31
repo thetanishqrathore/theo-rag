@@ -56,6 +56,14 @@ same application. No runtime code had to be brought back from it.
 | Frontend | Canonical `[chunk:<id>]` tokens were wrapped again as `[[chunk:<id>]]`: citation chips rendered inside literal brackets, and citations without a source card left `[]` | Bare-token normalizers skip canonical tokens |
 | Frontend | Citation post-processing collapsed all whitespace, including newlines, so headings/lists/paragraphs ran together | Only horizontal whitespace collapsed; `"  \n"` hard breaks kept |
 | Docs | README claimed answers are produced "without hallucinating" | Stated precisely what `grounded` means |
+| Retrieval | gpt-oss returned a query rewrite ending in a NUL byte; PostgreSQL rejects NUL, so the stream aborted | Control characters stripped from retrieval text |
+| Generation | A runaway reasoning loop filled the 32k context (2m50s) with no answer content → 500 | `RAG_GENERATION_MAX_TOKENS` (8192) caps output; an empty generation is retried once |
+| Citations | gpt-oss cites as `【chunk:<id>】`, `【<id>】` or `【chunk:<prefix>】` (31/200 answers); parsed as uncited | Normalized to `[chunk:<id>]` (backend and UI) |
+| Citations | Full-length chunk IDs miscopied by one or two hex digits | Unique evidence ID within 2 differing positions is used |
+| Citations | Only three cited sources received cards; the UI dropped the other references | Every cited source gets a card; unknown refs show `?` |
+| Attribution | 35 chapterless Clough transcripts lost series/part | `lessons.part_id` (migration 012) + in-place repair |
+| Evaluation | Error-only streams counted as passes; evidence rate divided by the wrong count (1.49); telemetry join import failed | Fixed in `scripts/eval_suite.py` |
+| Exposure | Visitors could select any installed Ollama model (e.g. a 51 GB coder model) | `API_ALLOWED_MODELS`; tunnel publishes only UI endpoints |
 
 ## Corpus decisions (please review)
 
@@ -166,22 +174,81 @@ exhaustively.
 
 ### Answer quality
 
-Not yet measured. The 200-case benchmark (both endpoints) and the 20-answer
-expert review are pending; until then this is a restored system, not a
-validated baseline.
+**Benchmark** (`scripts/eval_suite.py --mode both`, 200 cases, 400 endpoint calls;
+artifacts in `~/theo-rag-data/eval_runs/`). Three runs were needed: each of the
+first two exposed defects (fixed and listed above), so only run 3 is the baseline.
 
-## Open items (from review, 2026-10-31)
+| Metric | Run 1 | Run 2 | **Run 3 (baseline)** |
+| --- | ---: | ---: | ---: |
+| Endpoint calls succeeded | 399/400 | 400/400 | **400/400** |
+| Endpoint errors | 1 | 0 | **0** |
+| Stream-contract failures | 0 (one error stream miscounted) | 0 | **0** |
+| Returned citation IDs that resolve | (metric bug) | 100% | **100%** |
+| Telemetry join | (harness bug) | 100% | **100%** |
+| Refusal F1 (gold) | 0.97 | 0.98 | **0.98** |
+| Answer-mode accuracy (gold) | 0.69 | 0.68 | **0.70** |
+| Anchor recall (gold) | 0.63 | 0.63 | **0.61** |
+| Sentence-level citation coverage (silver) | 0.37 | 0.40 | **0.46** |
+| Stream latency avg / p95 | 11.0 / 16.5 s | 10.8 / 17.3 s | **10.3 / 16.0 s** |
 
-1. Backup verification must fail on checksum errors and verify a backup against
-   its own recorded inventory, not the live system; original corpus (all 2,812
-   files), configuration and service files need an independent copy.
-2. Citations beyond the three source cards are dropped from the user-facing
-   answer; every cited source should resolve and display.
-3. Clough intro lessons (Part 1, no chapter) lose series/part attribution.
-   Inferred lesson numbers (John, Israel) should be marked as inferred.
-4. Build/validation runs should record Git SHA, manifest digest, effective
-   configuration and tool/model identities; the resumable build should detect
-   changed or retired sources and stale outputs.
-5. Migration SQL and its ledger row should commit atomically.
-6. Browser chat history is capped and not backed up; application logs are not
-   rotated.
+GPU memory during run 2 (no other GPU work): median 76.8 GB, peak 77.0 GB.
+
+What run 1 and 2 surfaced: a NUL byte in a gpt-oss query rewrite aborting a
+stream; a runaway reasoning loop filling the 32k context (2m50s, no answer);
+gpt-oss's fullwidth `【chunk:…】` citations (31/200 answers) treated as
+uncited; harness bugs (error-only streams counted as passes, an evidence rate
+above 1, telemetry join import failure).
+
+**20-answer review** (10 per corpus: definition ×2, synthesis ×2, comparison ×2,
+multi-turn, ambiguity, refusal, citation-heavy; each answer read against the
+exact passages its citations resolve to; sheet in `~/theo-rag-data/review/`):
+
+- All 20 returned HTTP 200. Both refusal cases refused; narrow-expected cases
+  answered narrowly with citations.
+- **Attribution: no cross-corpus errors.** All 138 cited sentences cite the
+  right teacher's corpus.
+- Two "unresolved" citations were miscopied evidence IDs (now corrected); two
+  answers were "uncited" only because of fullwidth brackets (now parsed).
+- **Quotation fidelity is the weak point.** Of 78 quoted phrases:
+
+| Quote vs. sources | Count |
+| --- | ---: |
+| Verbatim in the cited passage (child or parent) | 34 (44%) |
+| Near-verbatim (≥ 50% of 3-word sequences, minor wording changes) | 9 (12%) |
+| Verbatim in another source cited in the same answer (citation on the wrong sentence) | 6 (8%) |
+| Verbatim elsewhere in the corpus, not in the cited sources | 6 (8%) |
+| Artifact of a miscopied ID (resolved by the fix) | 2 (3%) |
+| Largely not found: paraphrase presented as a quotation | 8 (10%) |
+| Quoted text carrying no citation | 13 (17%) |
+
+  12 of 20 answers contain at least one quote problem. A few claims add details
+  not in the cited passage (e.g. "starting point for all doctrine",
+  "ceased once the canon was finished").
+
+**Assessment.** The system is restored and operationally sound: zero endpoint
+errors, a valid stream contract, resolvable citations, correct teacher
+attribution and correct refusals. Claim-level fidelity, especially quotations,
+does not meet the release rule agreed in the plan ("no misattribution, no
+unsupported claims marked grounded"). This is gpt-oss behaviour under the
+existing prompt and the heuristic grounding policy, which this restoration
+deliberately did not change. Whether to accept it as a documented baseline
+limitation or fix it first (prompt rules for quotations, quote verification in
+post-processing, claim-level support checks) is the owner's decision before
+merge.
+
+## Open items
+
+Resolved since the 2026-10-31 review: backup verification and completeness (1),
+citation cards (2), intro attribution and inferred numbers (3), provenance and
+reconciliation (4), atomic migrations (5), log rotation and chat export (6).
+
+Still open:
+1. Decision on quotation fidelity (above) before merging and tagging
+   `phase1-baseline`.
+2. An independent backup destination (external drive/NAS/remote) for
+   `scripts/ops/copy_offsite.sh`; the workstation has one disk.
+3. Cloudflare WAF rate-limiting rule for `/api/query/stream` on
+   `bibleai.raeonlabs.com` (dashboard setting).
+4. Section labels for chapterless Clough lessons ("Conclusion",
+   "Appendix: …") are not stored; series/part are.
+5. Boot start of the services is enabled but not proven by a reboot.
