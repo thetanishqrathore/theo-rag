@@ -9,7 +9,8 @@ name: theo-rag
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # Pinned by digest: the pg16 tag moves; dumps/volumes were produced with this build.
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     container_name: theo_rag_postgres
     environment:
       POSTGRES_USER: raguser

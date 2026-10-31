@@ -1,0 +1,153 @@
+# Operations runbook
+
+Single-workstation deployment: PostgreSQL + Qdrant in Docker (localhost only),
+Ollama as a system service, and one FastAPI process that serves both the API and
+the built web UI on port 8000. Commands assume the repository root.
+
+## 1. One-time setup
+
+| Requirement | Reference version | Notes |
+| --- | --- | --- |
+| Python | 3.12 via [uv](https://docs.astral.sh/uv/) | `uv sync --locked --extra dev` creates `.venv` from `uv.lock` |
+| Node.js | 22 (`frontend/.nvmrc`) | Vite 7 needs `^20.19.0 \|\| >=22.12.0` |
+| Docker + Compose | Compose v2+ | user must be in the `docker` group |
+| Ollama | 0.40.x | `ollama pull gpt-oss:120b` (~65 GB; MXFP4) |
+| LibreOffice | 24.2 (`soffice`) | `sudo apt install libreoffice-writer-nogui`, or without root `scripts/setup/install_libreoffice_userspace.sh` |
+| Marker | **1.x** (`marker-pdf<2`) | `uv tool install "marker-pdf<2"`. Marker 2.x moved layout inference to a vLLM container and does not run with the CLI flags used here |
+| GPU | ~95 GB VRAM peak during a full build | GPT-OSS 120B ≈ 60 GiB at 32k context; embedder + reranker ≈ 4 GB; build-time Docling/Marker ≈ 10 GB |
+
+```bash
+uv sync --locked --extra dev
+cp .env.public.example .env            # then set data paths and tool commands
+docker compose up -d                   # empty volume => scripts/init.sql runs once
+.venv/bin/python scripts/migrate.py    # apply tracked migrations (idempotent)
+.venv/bin/python scripts/migrate.py --check
+```
+
+Working data (raw copies, canonical HTML, logs, manifests, build reports,
+backups) lives **outside the checkout** under the parent of `RAW_DATA_PATH`
+(reference: `~/theo-rag-data`).
+
+## 2. Building the corpus
+
+```bash
+# 1. Inventory every source file with include/exclude reasons.
+.venv/bin/python scripts/source_manifest.py \
+  --root "/path/to/bible_corpus" --output ~/theo-rag-data/source_manifest.json
+
+# 2. Build (resumable). Re-run the same command after any interruption.
+.venv/bin/python scripts/build_corpus.py \
+  --manifest ~/theo-rag-data/source_manifest.json \
+  --report-dir ~/theo-rag-data/build_reports
+```
+
+- Progress is driven by lesson status
+  (`pending → extracted → structured → validated → chunked → child_chunked → embedded`);
+  a failing stage never advances status.
+- Per-file/per-stage outcomes: `build_reports/<run_id>.jsonl`; summary:
+  `<run_id>_summary.json`.
+- Exit codes: `0` complete with exact Qdrant ID parity, `1` some included source
+  failed or is incomplete, `2` index parity mismatch.
+- After fixing a cause (tooling, manifest, config), retry failed lessons that
+  never reached chunking with `--retry-failed`.
+- Pilot a subset with `--paths-file pilot.txt` (manifest-relative paths).
+- `./reset.sh rebuild` = start infrastructure, migrate, then the build above.
+
+## 3. Service management (systemd user unit)
+
+```bash
+scripts/ops/install_service.sh        # builds frontend, writes ~/.config/systemd/user/theo-rag.service
+loginctl enable-linger "$USER"         # start at boot without a login session
+```
+
+| Action | Command |
+| --- | --- |
+| Status | `systemctl --user status theo-rag` |
+| Start / stop / restart | `systemctl --user start\|stop\|restart theo-rag` |
+| Logs | `journalctl --user -u theo-rag -f` (structured app log also in `$LOG_PATH/api.log`) |
+| Disable at boot | `systemctl --user disable theo-rag` |
+
+`ExecStartPre` (`scripts/ops/wait_for_deps.sh`) starts the Postgres/Qdrant
+containers and waits for Postgres, Qdrant and Ollama. The unit restarts on any
+exit (`Restart=always`). Run exactly one uvicorn worker: the GPU models and the
+generation semaphore are per process. `RAG_GENERATION_MAX_CONCURRENCY=1`
+serializes generations; extra requests get a `busy` error instead of queueing.
+
+Access: `http://localhost:8000` and `http://<LAN address>:8000`. The API has no
+authentication of its own; do not expose port 8000 beyond a trusted LAN.
+Internet exposure (Cloudflare Tunnel + Access) is described in
+`docs/cloudflare_tunnel_setup.md` and is not part of the Phase 1 baseline.
+
+## 4. Health checks
+
+```bash
+curl -s localhost:8000/api/health      # {"status":"healthy","services":{postgres,qdrant,ollama}}
+curl -s localhost:8000/api/stats       # Qdrant points per corpus
+curl -s localhost:11434/api/ps         # loaded Ollama models, context length, VRAM
+.venv/bin/python -m src.processing index clough --verify   # count parity
+```
+
+Smoke query:
+
+```bash
+curl -s localhost:8000/api/query -H 'Content-Type: application/json' \
+  -d '{"query":"What is the faith-rest drill?","corpus":"clough","top_k":7}' | python3 -m json.tool | head -20
+```
+
+The first answer after a cold start includes loading GPT-OSS (~30 s from disk,
+~7 s from page cache). Helper calls reuse `OLLAMA_NUM_CTX`, because Ollama
+reloads the model whenever the context size changes.
+
+## 5. Backup and restore
+
+```bash
+scripts/ops/backup.sh                       # -> ~/theo-rag-data/backups/<timestamp>/
+scripts/ops/verify_restore.sh ~/theo-rag-data/backups/<timestamp>
+```
+
+A backup contains `postgres.dump` (pg_dump custom format), one Qdrant snapshot
+per collection, `working_data.tar.gz` (raw copies, canonical HTML, manifest,
+build reports), and `SHA256SUMS`. `verify_restore.sh` restores into **isolated
+scratch storage** (scratch database, throwaway Qdrant container on port 16333,
+temp directory), compares counts with the live system, and removes the scratch
+storage. Run it after each backup.
+
+Restoring into the live system (destructive, so stop the service first):
+
+```bash
+systemctl --user stop theo-rag
+docker exec -i theo_rag_postgres psql -U raguser -d postgres -c 'DROP DATABASE theology_rag' -c 'CREATE DATABASE theology_rag'
+docker exec -i theo_rag_postgres pg_restore -U raguser -d theology_rag --no-owner < BACKUP/postgres.dump
+for s in BACKUP/qdrant/*.snapshot; do
+  c=$(basename "$s" .snapshot)
+  curl -fsS -X POST "localhost:6333/collections/$c/snapshots/upload?priority=snapshot" -F "snapshot=@$s"
+done
+tar -C ~/theo-rag-data -xzf BACKUP/working_data.tar.gz
+systemctl --user start theo-rag
+```
+
+Alternatively, everything except the raw corpus is reproducible: `./reset.sh
+destroy --yes-delete-all-data` followed by `./reset.sh rebuild` regenerates the
+database and index from the source files (about 1–2 hours on the reference GPU).
+
+## 6. Rollback
+
+- **Code:** the baseline is tagged `phase1-baseline`. To roll back,
+  `git checkout phase1-baseline && uv sync --locked && npm --prefix frontend ci && npm --prefix frontend run build && systemctl --user restart theo-rag`.
+- **Data:** restore the most recent backup taken before the change (section 5).
+- **Model:** pin the model by digest recorded in `docs/RESTORATION_NOTES.md`;
+  `ollama list` shows the installed digest.
+- **Experiments:** keep retrieval experiments behind their default-off flags
+  (`RAG_RRF_FUSION_ENABLED`, `RAG_BM25_OR_FALLBACK_ENABLED`, …) and on separate
+  branches; compare candidate runs against the baseline with
+  `scripts/eval_compare.py`.
+
+## 7. Evaluation
+
+```bash
+.venv/bin/python scripts/eval_suite.py --api-base http://localhost:8000 \
+  --input eval/benchmark/v1_cases.jsonl --mode both --output-root ~/theo-rag-data/eval_runs
+```
+
+Run artifacts include corpus text and query logs, so they stay outside Git
+(`eval/reports/` is gitignored).
