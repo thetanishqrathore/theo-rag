@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import sys
 import time
@@ -37,6 +38,7 @@ from src.db.models import SourceFile, TranscriptLesson, TranscriptParentChunk  #
 from src.db.operations import get_file_tag_id  # noqa: E402
 from src.db.session import get_sessionmaker  # noqa: E402
 from src.ingestion.tag_registry import get_tag_spec  # noqa: E402
+from src.utils.config import get_config  # noqa: E402
 
 # Ingest order matters only for readability of reports; the manifest already
 # removed exact duplicates across tags.
@@ -202,6 +204,18 @@ def index_and_verify(session, corpora: list[str], reporter: Reporter) -> bool:
     return all_ok
 
 
+def acquire_corpus_lock():
+    """Exclusive lock shared with scripts/ops/backup.sh: builds and backups never overlap."""
+    data_root = Path(get_config().raw_data_path).expanduser().resolve().parent
+    data_root.mkdir(parents=True, exist_ok=True)
+    handle = open(data_root / ".corpus.lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(f"another build or a backup holds {data_root / '.corpus.lock'}; retry later")
+    return handle
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--manifest", required=True)
@@ -231,6 +245,7 @@ def main() -> None:
     reporter = Reporter(Path(args.report_dir).expanduser(), run_id)
     print(f"run {run_id}: {len(entries)} source(s), tags={tags}")
 
+    lock_handle = acquire_corpus_lock()  # noqa: F841 - held until exit
     session = get_sessionmaker()()
     try:
         if args.retry_failed:

@@ -101,16 +101,42 @@ reloads the model whenever the context size changes.
 ## 5. Backup and restore
 
 ```bash
-scripts/ops/backup.sh                       # -> ~/theo-rag-data/backups/<timestamp>/
+scripts/ops/archive_originals.sh "/path/to/bible_corpus"   # immutable copy of ALL original files (no-op if unchanged)
+scripts/ops/backup.sh                                       # -> ~/theo-rag-data/backups/<timestamp>/
 scripts/ops/verify_restore.sh ~/theo-rag-data/backups/<timestamp>
+scripts/ops/copy_offsite.sh ~/theo-rag-data/backups/<timestamp> /media/<external-drive>/theo-rag
+scripts/ops/install_backup_timer.sh 03:30                   # optional nightly backup + verify
 ```
 
-A backup contains `postgres.dump` (pg_dump custom format), one Qdrant snapshot
-per collection, `working_data.tar.gz` (raw copies, canonical HTML, manifest,
-build reports), and `SHA256SUMS`. `verify_restore.sh` restores into **isolated
-scratch storage** (scratch database, throwaway Qdrant container on port 16333,
-temp directory), compares counts with the live system, and removes the scratch
-storage. Run it after each backup.
+A backup is self-describing and bound to one corpus revision:
+
+| Item | Contents |
+| --- | --- |
+| `postgres.dump` | pg_dump custom format |
+| `qdrant/*.snapshot` | one snapshot per collection |
+| `working_data.tar.gz` + `working_files.sha256` | raw copies, canonical HTML, manifest, build reports, each file hashed |
+| `originals/` | all 2,812 original files (`originals.tar`, per-file `originals.sha256`, `REVISION`), hard-linked from `~/theo-rag-data/originals/originals_<revision>/` |
+| `config/` | `.env` (contains credentials: keep backups private), compose file, `uv.lock`, systemd unit, `tool_identities.txt` (Git SHA, corpus revision, model digest, image digests, tool versions) |
+| `inventory.json` | expected row counts and sorted-ID digests per table, Qdrant config and point-ID digests |
+| `SHA256SUMS` | every file above |
+
+`backup.sh` holds `~/theo-rag-data/.corpus.lock` (also taken by
+`build_corpus.py`), so a build cannot write while a backup runs.
+
+`verify_restore.sh` aborts on any checksum failure, restores into isolated
+scratch storage (scratch database, throwaway Qdrant on :16333, temp
+directories), and compares the result with the backup's own inventory, not
+with the live system. A backup can therefore be proven after the workstation
+is gone. It also checks that restored Qdrant point IDs equal restored PostgreSQL
+embedded chunk IDs, and that every working and original file hash matches.
+`scripts/ops/test_backup_verification.sh BACKUP_DIR` confirms that a corrupted
+archive, a missing file, and equal counts with wrong IDs all fail.
+
+**Independent storage:** the reference workstation has a single NVMe disk, so
+the corpus, checkout, working data and local backups share one failure domain.
+`copy_offsite.sh` refuses a destination on the same filesystem and re-verifies
+checksums at the destination; run it against an external drive, NAS mount or
+`host:/path` after each backup.
 
 Restoring into the live system (destructive, so stop the service first):
 

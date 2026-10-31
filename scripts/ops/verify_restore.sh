@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# Prove a backup is restorable WITHOUT touching live data.
+# Prove a backup is restorable WITHOUT touching or consulting live data.
 #
 #   scripts/ops/verify_restore.sh BACKUP_DIR
 #
-# Restores into isolated storage only: a scratch database inside the running
-# PostgreSQL container, a throwaway Qdrant container on port 16333 with its own
-# volume, and a temporary directory for working data. Compares row/point/file
-# counts with the backup's sources, then removes all scratch storage.
+# 1. Verifies every file against SHA256SUMS (any mismatch aborts).
+# 2. Restores into isolated scratch storage only: a scratch database inside the
+#    PostgreSQL container, a throwaway Qdrant container on port 16333 with its
+#    own volume, and temporary directories for working data and originals.
+# 3. Compares the restored database, index and files with the backup's own
+#    inventory.json / working_files.sha256 / originals.sha256 (counts, sorted-ID
+#    digests, per-file hashes) and cross-checks restored PostgreSQL embedded
+#    chunk IDs against restored Qdrant point IDs.
+# Scratch storage is always removed. Exit 0 only if every check passes.
 set -euo pipefail
 
-BACKUP="${1:?usage: verify_restore.sh BACKUP_DIR}"
+BACKUP="$(cd "${1:?usage: verify_restore.sh BACKUP_DIR}" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PY="$ROOT_DIR/.venv/bin/python"
 SCRATCH_DB="theology_rag_restore_check"
 SCRATCH_QDRANT="theo_rag_qdrant_restore_check"
 SCRATCH_PORT=16333
-LIVE_QDRANT="${QDRANT_URL:-http://127.0.0.1:6333}"
+SCRATCH_URL="postgresql://raguser:dev_password@127.0.0.1:5432/$SCRATCH_DB"
 TMP="$(mktemp -d)"
 PSQL=(docker exec -i theo_rag_postgres psql -v ON_ERROR_STOP=1 -U raguser -At)
 
@@ -25,43 +32,54 @@ cleanup() {
 }
 trap cleanup EXIT
 
-(cd "$BACKUP" && sha256sum -c --quiet SHA256SUMS) && echo "checksums OK"
-
-echo "== postgres"
-"${PSQL[@]}" -d theology_rag -c "DROP DATABASE IF EXISTS $SCRATCH_DB" -c "CREATE DATABASE $SCRATCH_DB" >/dev/null
-docker exec -i theo_rag_postgres pg_restore -U raguser -d "$SCRATCH_DB" --no-owner < "$BACKUP/postgres.dump"
-fail=0
-for table in lessons parent_chunks child_chunks source_files schema_migrations; do
-  live="$("${PSQL[@]}" -d theology_rag -c "SELECT count(*) FROM $table")"
-  restored="$("${PSQL[@]}" -d "$SCRATCH_DB" -c "SELECT count(*) FROM $table")"
-  status=OK; [[ "$live" == "$restored" ]] || { status=MISMATCH; fail=1; }
-  printf '  %-18s live=%-8s restored=%-8s %s\n' "$table" "$live" "$restored" "$status"
+for required in SHA256SUMS inventory.json working_files.sha256 postgres.dump working_data.tar.gz; do
+  [[ -f "$BACKUP/$required" ]] || { echo "backup incomplete: missing $required" >&2; exit 1; }
 done
-embedded="$("${PSQL[@]}" -d "$SCRATCH_DB" -c "SELECT count(*) FROM child_chunks WHERE embedding IS NOT NULL")"
-echo "  restored embedded child chunks: $embedded"
 
-echo "== qdrant"
+echo "== checksums"
+if ! (cd "$BACKUP" && sha256sum -c --quiet SHA256SUMS); then
+  echo "CHECKSUM FAILURE: backup is damaged; not restoring" >&2
+  exit 1
+fi
+listed="$(wc -l < "$BACKUP/SHA256SUMS")"
+actual="$(cd "$BACKUP" && find . -type f ! -name SHA256SUMS | wc -l)"
+[[ "$listed" == "$actual" ]] || { echo "CHECKSUM FAILURE: $actual files present, $listed listed" >&2; exit 1; }
+echo "  ok  $listed files"
+
+echo "== restore postgres (scratch database)"
+"${PSQL[@]}" -d theology_rag -c "DROP DATABASE IF EXISTS $SCRATCH_DB" -c "CREATE DATABASE $SCRATCH_DB" >/dev/null
+docker exec -i theo_rag_postgres pg_restore -U raguser -d "$SCRATCH_DB" --no-owner --exit-on-error < "$BACKUP/postgres.dump"
+
+echo "== restore qdrant (throwaway container :$SCRATCH_PORT)"
 docker run -d --name "$SCRATCH_QDRANT" -p "127.0.0.1:$SCRATCH_PORT:6333" \
   -v "${SCRATCH_QDRANT}_data:/qdrant/storage" qdrant/qdrant:v1.7.0 >/dev/null
-until curl -fsS "http://127.0.0.1:$SCRATCH_PORT/collections" >/dev/null 2>&1; do sleep 1; done
+for _ in $(seq 1 60); do
+  curl -fsS "http://127.0.0.1:$SCRATCH_PORT/collections" >/dev/null 2>&1 && break
+  sleep 1
+done
 for snapshot in "$BACKUP"/qdrant/*.snapshot; do
   collection="$(basename "$snapshot" .snapshot)"
   curl -fsS -X POST "http://127.0.0.1:$SCRATCH_PORT/collections/$collection/snapshots/upload?priority=snapshot" \
     -F "snapshot=@$snapshot" >/dev/null
-  live="$(curl -fsS "$LIVE_QDRANT/collections/$collection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["points_count"])')"
-  restored="$(curl -fsS "http://127.0.0.1:$SCRATCH_PORT/collections/$collection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["points_count"])')"
-  status=OK; [[ "$live" == "$restored" ]] || { status=MISMATCH; fail=1; }
-  printf '  %-18s live=%-8s restored=%-8s %s\n' "$collection" "$live" "$restored" "$status"
 done
 
-echo "== working data"
-tar -C "$TMP" -xzf "$BACKUP/working_data.tar.gz"
-for dir in raw canonical; do
-  echo "  $dir files restored: $(find "$TMP/$dir" -type f | wc -l)"
-done
+echo "== extract working data"
+mkdir -p "$TMP/working"
+tar -C "$TMP/working" -xzf "$BACKUP/working_data.tar.gz"
 
-if [[ "$fail" -ne 0 ]]; then
-  echo "RESTORE CHECK FAILED (counts differ; live data may have changed since the backup)" >&2
-  exit 1
+echo "== compare with backup inventory"
+"$PY" "$ROOT_DIR/scripts/ops/backup_inventory.py" verify --backup-dir "$BACKUP" \
+  --database-url "$SCRATCH_URL" --qdrant-url "http://127.0.0.1:$SCRATCH_PORT" --working-dir "$TMP/working"
+
+if [[ -f "$BACKUP/originals/originals.tar" ]]; then
+  echo "== originals"
+  mkdir -p "$TMP/originals"
+  tar -C "$TMP/originals" -xf "$BACKUP/originals/originals.tar"
+  (cd "$TMP/originals" && sha256sum -c --quiet "$BACKUP/originals/originals.sha256")
+  count="$(find "$TMP/originals" -type f | wc -l)"
+  [[ "$count" == "$(wc -l < "$BACKUP/originals/originals.sha256")" ]]
+  [[ "$(sha256sum "$BACKUP/originals/originals.sha256" | cut -c1-64)" == "$(cat "$BACKUP/originals/REVISION")" ]]
+  echo "  ok  $count original files (revision $(cut -c1-16 "$BACKUP/originals/REVISION"))"
 fi
+
 echo "restore check passed: $BACKUP"
