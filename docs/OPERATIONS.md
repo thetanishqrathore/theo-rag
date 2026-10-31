@@ -82,6 +82,21 @@ scripts/ops/install_service.sh        # builds frontend, writes ~/.config/system
 loginctl enable-linger "$USER"         # start at boot without a login session
 ```
 
+**Whole system at once:** `./theorag.sh` controls every TheoRAG piece in
+dependency order. It never touches other containers or the Ollama system
+service, and deletes no data.
+
+| Command | Effect |
+| --- | --- |
+| `./theorag.sh start [--local]` | containers → API (waits for `/api/health`) → tunnel (waits for the public URL); `--local` keeps the public site offline |
+| `./theorag.sh stop [--force]` | tunnel → API → containers, then makes sure GPT-OSS is out of GPU memory; refuses while a build or backup holds `.corpus.lock` |
+| `./theorag.sh restart [--local]` | stop, then start |
+| `./theorag.sh status` | services, containers, health, public URL, GPU; exit 1 if anything is down |
+| `./theorag.sh logs [api\|tunnel]` | follow a journal |
+| `./theorag.sh boot on\|off` | start at boot, or stay off after a reboot |
+
+Individual units:
+
 | Action | Command |
 | --- | --- |
 | Status | `systemctl --user status theo-rag` |
