@@ -186,4 +186,35 @@ describe('MessageBubble', () => {
     expect(screen.getByText(/No direct citation anchors were found/i)).not.toBeNull()
     expect(screen.queryByText('narrow_answer_no_primary_matches_found')).toBeNull()
   })
+
+  it('renders canonical chunk citations as chips without stray brackets', () => {
+    const id = '40fcd7c4-bfdb-469a-b598-cef798115d11'
+    const { container } = render(
+      <MessageBubble
+        message={buildAssistantMessage({
+          content: `God alone is the Creator [chunk:${id}]. An uncited aside [chunk:52e25401-fd0f-4372-8b45-faaf8c5ffafe].`,
+          evidence: [
+            { evidence_id: id, parent_id: 'p1', label: 'Source 1', path: 'path-1', is_primary: true, context_only: false },
+          ],
+          used_evidence_ids: [id],
+        })}
+      />
+    )
+    expect(screen.getByRole('button', { name: /citation 1/i })).not.toBeNull()
+    expect(container.textContent).not.toMatch(/\[\s*1?\s*\]/)
+    expect(container.textContent).not.toContain('chunk:')
+  })
+
+  it('keeps markdown structure (headings, lists, paragraphs) in answers', () => {
+    const { container } = render(
+      <MessageBubble
+        message={buildAssistantMessage({
+          content: '### Definition  \n\nIntro paragraph.  \n\n- **First** point\n- Second point\n\nClosing paragraph.',
+        })}
+      />
+    )
+    expect(container.querySelector('h3')?.textContent).toBe('Definition')
+    expect(container.querySelectorAll('li')).toHaveLength(2)
+    expect(container.querySelectorAll('p').length).toBeGreaterThanOrEqual(2)
+  })
 })

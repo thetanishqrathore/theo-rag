@@ -43,8 +43,9 @@ const normalizeCitationTokens = (content: string) => {
   let normalized = content
   normalized = normalized.replace(/\[\s*chunk\s*[: ]\s*([0-9a-fA-F-]{1,})\s*\]/gi, '[chunk:$1]')
   normalized = normalized.replace(/\bchunk[_\s-]?id\b\s*:\s*([0-9a-fA-F-]{1,})/gi, '[chunk:$1]')
-  normalized = normalized.replace(/\bchunk\s*:\s*([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
-  normalized = normalized.replace(/\bchunk\s+([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
+  // Bare `chunk:<id>` only; canonical `[chunk:<id>]` must not be wrapped again.
+  normalized = normalized.replace(/(?<!\[)\bchunk\s*:\s*([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
+  normalized = normalized.replace(/(?<!\[)\bchunk\s+([0-9a-fA-F-]{1,})\b/gi, '[chunk:$1]')
   normalized = normalized.replace(/\[\s*source\s+(\d{1,3})\s*\]/gi, '[SOURCE $1]')
   normalized = normalized.replace(/\(\s*source\s+(\d{1,3})\s*\)/gi, '[SOURCE $1]')
   normalized = normalized.replace(/\[\s*·\s*\]/g, '')
@@ -75,8 +76,10 @@ const transformCitationsToLinks = (
   })
   return rendered
     .replace(/\[(?:chunk|SOURCE)[^\]]*\]/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\s+([.,;:!?])/g, '$1')
+    // Collapse horizontal whitespace only: newlines (and "  \n" hard breaks) carry
+    // the markdown structure.
+    .replace(/[^\S\n]{2,}(?!\n)/g, ' ')
+    .replace(/[^\S\n]+([.,;:!?])/g, '$1')
     .trim()
 }
 
