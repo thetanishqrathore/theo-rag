@@ -53,6 +53,19 @@ def get_ollama_client(timeout: float | None = None) -> ollama.Client:
     return ollama.Client(host=config.ollama_host, timeout=timeout or config.ollama_timeout)
 
 
+def helper_num_ctx(model_name: str | None, requested: int) -> int:
+    """Context size for helper calls (rewrite, follow-ups, enrichment, warmup).
+
+    Ollama reloads a model whenever num_ctx changes (~7s for gpt-oss:120b), so
+    calls to the primary generation model always reuse OLLAMA_NUM_CTX. A
+    separate secondary model keeps the smaller helper context.
+    """
+    config = get_config()
+    if _model_name_matches(model_name or "", config.ollama_model):
+        return int(config.ollama_num_ctx)
+    return requested
+
+
 def _default_warm_timeout(model_name: str) -> float:
     config = get_config()
     if model_name == config.ollama_model:
@@ -66,7 +79,8 @@ def warm_ollama_model(model_name: str, keep_alive: str, timeout: float | None = 
     client.generate(
         model=model_name,
         prompt=" ",
-        options={"num_ctx": 1, "temperature": 0},
+        # num_predict=1: reasoning models would otherwise answer the blank prompt in full.
+        options={"num_ctx": helper_num_ctx(model_name, 1), "temperature": 0, "num_predict": 1},
         keep_alive=keep_alive,
     )
 
@@ -131,6 +145,8 @@ def maybe_warm_ollama_model(model_name: str, keep_alive: str) -> Tuple[bool, flo
 def warm_ollama_models(model_names: Iterable[str], keep_alive: str) -> None:
     """Warm multiple models, logging failures without raising."""
     for model_name in model_names:
+        if not model_name:
+            continue
         try:
             warm_ollama_model(model_name, keep_alive)
             _LAST_WARM[model_name] = time.monotonic()
@@ -142,6 +158,8 @@ def warm_ollama_models(model_names: Iterable[str], keep_alive: str) -> None:
 def unload_ollama_models(model_names: Iterable[str]) -> None:
     """Request model unloads by setting keep_alive=0s."""
     for model_name in model_names:
+        if not model_name:
+            continue
         try:
             warm_ollama_model(model_name, keep_alive="0s")
             _LAST_WARM.pop(model_name, None)

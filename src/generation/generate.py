@@ -7,7 +7,7 @@ import time
 import json
 import math
 import threading
-from typing import Optional, List, Dict, Generator, Callable
+from typing import Optional, List, Dict, Generator, Callable, Iterable
 
 import ollama
 import structlog
@@ -22,7 +22,7 @@ from src.observability.logging import log_event
 from src.observability.timer import SpanTimer
 from src.utils.config import get_config
 from src.utils.logging import setup_logging
-from src.utils.ollama_client import get_ollama_client
+from src.utils.ollama_client import get_ollama_client, helper_num_ctx
 from src.utils.text import STOPWORDS
 
 logger = structlog.get_logger()
@@ -32,6 +32,8 @@ _CHUNK_ID_PATTERN = r"[0-9a-fA-F-]{8,}"
 _CHUNK_ORDINAL_PATTERN = r"\d{1,3}"
 _CHUNK_REF_PATTERN = rf"(?:{_CHUNK_ID_PATTERN}|{_CHUNK_ORDINAL_PATTERN})"
 CITATION_STRATEGY_VERSION = "recall-first-single-profile-v1"
+# Seconds between status heartbeats while a reasoning model streams only its reasoning.
+REASONING_HEARTBEAT_SEC = 5.0
 _SMALL_TALK_EXACT = {
     "hi",
     "hello",
@@ -695,7 +697,7 @@ def generate_followups(
         response = client.generate(
             model=model,
             prompt=prompt,
-            options={"num_ctx": 2048, "temperature": 0.2},
+            options={"num_ctx": helper_num_ctx(model, 2048), "temperature": 0.2},
             keep_alive=keep_alive,
         )
         raw = response.get("response", "").strip()
@@ -1435,6 +1437,31 @@ def generate_grounded_answer(
     )
 
 
+def _stream_answer_events(
+    stream: Iterable[dict],
+    heartbeat_sec: float = REASONING_HEARTBEAT_SEC,
+) -> Generator[dict, None, None]:
+    """Map Ollama chat stream chunks to answer events.
+
+    Only `message.content` becomes answer tokens. Reasoning models (e.g. gpt-oss)
+    stream their reasoning in `message.thinking`; it never enters the answer,
+    citations, or telemetry. While only reasoning arrives, emit a status event at
+    most every `heartbeat_sec` so clients do not mistake it for a stalled stream.
+    """
+    last_heartbeat = time.perf_counter()
+    for chunk in stream:
+        message = chunk.get("message", {}) or {}
+        token = message.get("content", "")
+        if token:
+            yield {"type": "token", "content": token}
+            continue
+        if message.get("thinking"):
+            now = time.perf_counter()
+            if now - last_heartbeat >= heartbeat_sec:
+                yield {"type": "status", "phase": "generating", "message": "Reasoning..."}
+                last_heartbeat = now
+
+
 def stream_grounded_answer(
     query: str,
     corpus: str,
@@ -1609,11 +1636,14 @@ def stream_grounded_answer(
             stream=True,
         )
 
-        for chunk in stream:
-            token = chunk.get("message", {}).get("content", "")
+        for event in _stream_answer_events(stream):
+            if event["type"] != "token":
+                yield event
+                continue
+            token = event["content"]
             if token:
                 full_response += token
-                yield {"type": "token", "content": token}
+                yield event
                 token_count += 1
                 if not first_token_logged:
                     log_event(

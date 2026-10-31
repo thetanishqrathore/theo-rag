@@ -128,3 +128,25 @@ STOPWORDS = {
     "yourself",
     "yourselves",
 }
+
+
+# Typographic characters some models (e.g. gpt-oss) emit in place of ASCII.
+# Corpus text uses ASCII hyphens/spaces, so lexical search would miss terms like
+# "faith‑rest" (U+2011) unless model-written queries are folded back.
+_SEARCH_TEXT_TRANSLATION = str.maketrans(
+    {
+        "‐": "-",  # hyphen
+        "‑": "-",  # non-breaking hyphen
+        "‒": "-",  # figure dash
+        "−": "-",  # minus sign
+        " ": " ",  # no-break space
+        " ": " ",  # narrow no-break space
+        " ": " ",  # figure space
+        " ": " ",  # thin space
+    }
+)
+
+
+def normalize_search_text(text: str) -> str:
+    """Fold model-emitted typographic hyphens/spaces to ASCII for retrieval."""
+    return text.translate(_SEARCH_TEXT_TRANSLATION)

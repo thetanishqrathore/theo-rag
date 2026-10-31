@@ -54,7 +54,7 @@ from src.generation.generate import (
 from src.retrieval.retrieve import retrieve_context_with_stats
 from src.retrieval.citation_utils import build_citation_path, lesson_label
 from src.utils.config import get_config
-from src.utils.ollama_client import get_ollama_client, warm_ollama_model, maybe_warm_ollama_model
+from src.utils.ollama_client import get_ollama_client, helper_num_ctx, warm_ollama_model, maybe_warm_ollama_model
 from src.utils.qdrant_client import get_qdrant_client
 from src.utils.logging import setup_logging
 from src.telemetry.rag_telemetry import (
@@ -1070,7 +1070,7 @@ def enrich_citations(request: EnrichCitationsRequest) -> dict:
             response = client.generate(
                 model=model_name,
                 prompt=prompt,
-                options={"num_ctx": 4096, "temperature": 0.2},
+                options={"num_ctx": helper_num_ctx(model_name, 4096), "temperature": 0.2},
                 keep_alive=config.ollama_keepalive,
             )
             raw_text = response.get("response", "")

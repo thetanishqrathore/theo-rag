@@ -39,8 +39,8 @@ from src.utils.logging import setup_logging
 from src.observability.logging import log_event
 from src.observability.timer import SpanTimer
 from src.utils.qdrant_client import get_qdrant_client
-from src.utils.ollama_client import get_ollama_client
-from src.utils.text import STOPWORDS
+from src.utils.ollama_client import get_ollama_client, helper_num_ctx
+from src.utils.text import STOPWORDS, normalize_search_text
 
 logger = structlog.get_logger()
 DEFINITION_PATTERN = re.compile(r"\bmeans\b|\bdefined as\b|\bin other words\b", re.IGNORECASE)
@@ -78,10 +78,10 @@ def rewrite_query(query: str, history: list[dict] | None = None) -> str:
         response = client.generate(
             model=model_name,
             prompt=prompt,
-            options={"num_ctx": 2048, "temperature": 0.0},
+            options={"num_ctx": helper_num_ctx(model_name, 2048), "temperature": 0.0},
             keep_alive=config.ollama_keepalive,
         )
-        rewritten = response.get("response", "").strip()
+        rewritten = normalize_search_text(response.get("response", "")).strip()
         if rewritten and 5 < len(rewritten) < 500:
             log_event("query_rewritten", span="retrieval", original=query, rewritten=rewritten)
             return rewritten

@@ -74,7 +74,7 @@ class AppConfig(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "gpt-oss:120b"
     secondary_ollama_model: str = ""
-    ollama_timeout: int = 180
+    ollama_timeout: int = 900
     ollama_keepalive: str = "5m"
     ollama_warm_on_startup: bool = True
     ollama_num_ctx: int = Field(default=32768, validation_alias="OLLAMA_NUM_CTX")
@@ -326,6 +326,9 @@ class AppConfig(BaseSettings):
         validation_alias="RAG_CITATION_AUTOMAP_MAX_CITES_PER_SENTENCE",
     )
     api_allowed_origins: str = Field(default="http://localhost:5173", validation_alias="API_ALLOWED_ORIGINS")
+    # Built frontend (npm run build) served by the API at "/". Relative paths resolve
+    # against the repository root; empty disables frontend serving.
+    frontend_dist_path: str = Field(default="frontend/dist", validation_alias="FRONTEND_DIST_PATH")
 
     class Config:
         env_file = ".env"
