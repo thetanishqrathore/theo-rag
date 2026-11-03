@@ -365,7 +365,23 @@ def _sufficiency_thresholds_for_corpus(corpus: str, config) -> tuple[float, floa
     )
 
 
+# A question that asks for material outside the corpus is refused before generation;
+# the partial-answer rules would otherwise answer the related in-corpus subject.
+_OUT_OF_CORPUS_REQUEST_RE = re.compile(
+    r"\b(?:not|isn['’]t|is not|aren['’]t|are not)\s+(?:covered|found|contained|included|addressed)\s+"
+    r"(?:in|by)\s+(?:this|the|these)\s+(?:corpus|sources?|materials?|lessons?)\b"
+    r"|\boutside\s+(?:of\s+)?(?:this|the|these)\s+(?:corpus|sources?|materials?|lessons?)\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_out_of_corpus_material(query: str) -> bool:
+    return bool(_OUT_OF_CORPUS_REQUEST_RE.search(query or ""))
+
+
 def evaluate_sufficiency(query: str, parent_chunks: List[SearchResult], corpus: str) -> tuple[str, dict]:
+    if getattr(get_config(), "rag_partial_answers_enabled", False) and asks_for_out_of_corpus_material(query):
+        return "refuse", {"reason": "out_of_corpus_request"}
     primary_chunks = [c for c in parent_chunks if c.is_primary]
     if not primary_chunks:
         return "refuse", {"reason": "no_primary_chunks"}

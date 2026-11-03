@@ -13,6 +13,7 @@ from src.generation.generate import (  # noqa: E402
     REFUSAL_TEXT,
     _legacy_silence_rule,
     _partial_answer_rules,
+    asks_for_out_of_corpus_material,
     verify_quotations,
 )
 
@@ -60,3 +61,15 @@ def test_partial_answer_rules_keep_refusal_for_true_silence() -> None:
     assert REFUSAL_TEXT in rules
     assert "Never attribute to Pastor Dean" in rules
     assert REFUSAL_TEXT in _legacy_silence_rule()
+
+
+def test_explicit_requests_for_material_outside_the_corpus_are_detected() -> None:
+    assert asks_for_out_of_corpus_material(
+        "Provide external historical data and modern policy implications about election not covered in this corpus."
+    )
+    assert asks_for_out_of_corpus_material("What do sources outside the corpus say about grace?")
+    # A topic the corpus may not cover is a partial-answer question, not an explicit request.
+    assert not asks_for_out_of_corpus_material(
+        "How does Pastor Dean evaluate Cyril of Alexandria's Twelve Anathemas against Nestorius?"
+    )
+    assert not asks_for_out_of_corpus_material("Which topics are covered in this corpus?")
