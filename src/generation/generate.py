@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 import time
 import json
 import math
@@ -146,6 +147,33 @@ def _build_sources_section(parent_chunks: List[SearchResult], use_chunk_ids: boo
     return lines
 
 
+def _legacy_silence_rule() -> str:
+    return (
+        "5. **Handling Silence:** If the sources do not explicitly support the core of the user's question, you must respond exactly:\n"
+        f'   "{REFUSAL_TEXT}"\n\n'
+    )
+
+
+def _partial_answer_rules(speaker: str) -> str:
+    """Answer the covered part instead of refusing; quote only exact source words."""
+    return (
+        "5. **Partial Coverage:** If the question asks about something the sources do not contain (a person, book, "
+        "theory or argument) but the sources do address the related subject, do NOT refuse. Start with one sentence "
+        f"saying plainly that the sources do not address that specific point, then answer what {speaker} does teach "
+        "on the related subject, with citations. If the question asks how two ideas connect and the sources discuss "
+        "both without stating the connection, present what each source says and note that the explicit connection "
+        "is not stated.\n"
+        "6. **Handling Silence:** Only if the sources contain nothing relevant to any part of the question, respond exactly:\n"
+        f'   "{REFUSAL_TEXT}"\n'
+        f"7. **No Imported Facts:** Never attribute to {speaker} a name, term, theory or detail that does not appear "
+        "in the sources, even if you know it from elsewhere.\n\n"
+        "### QUOTATION RULES:\n"
+        "1. Use quotation marks only for words copied exactly, word for word, from a single source (at most about "
+        "25 words), and put that source's citation right after the closing quotation mark.\n"
+        "2. Paraphrase without quotation marks. Never put quotation marks around a summary or reworded sentence.\n\n"
+    )
+
+
 def build_grounded_messages(
     query: str,
     parent_chunks: List[SearchResult],
@@ -229,8 +257,7 @@ def build_grounded_messages(
         "2. **Theological Precision:** When explaining a term or concept, give the teacher's specific definition first, then explain its significance and context within the broader teaching.\n"
         "3. **Cross-Lesson Awareness:** When multiple sources address the same topic, note areas of agreement. Mention the lesson context (e.g., series or lesson number) when it helps the reader locate the teaching.\n"
         "4. **Scope Honesty:** If the retrieved evidence only covers some aspects of the question, state explicitly what aspects are NOT covered rather than speculating beyond the sources.\n"
-        "5. **Handling Silence:** If the sources do not explicitly support the core of the user's question, you must respond exactly:\n"
-        f'   "{REFUSAL_TEXT}"\n\n'
+        + (_partial_answer_rules(speaker) if config.rag_partial_answers_enabled else _legacy_silence_rule()) +
 
         # A3: Answer structure guidance
         "### ANSWER STRUCTURE GUIDANCE:\n"
@@ -1211,6 +1238,48 @@ def _retry_citation_repair(
     return normalize_citation_markup(answer_text).strip(), [], False
 
 
+_QUOTED_SPAN_RE = re.compile(r"\u201c([^\u201c\u201d\n]{3,600})\u201d|\"([^\"\n]{3,600})\"")
+_ELLIPSIS_RE = re.compile(r"\.\.\.|\u2026")
+
+
+def _quote_key(text: str) -> str:
+    """Compare quotes ignoring case, punctuation, hyphen and space variants (U+2011, NBSP)."""
+    folded = unicodedata.normalize("NFKC", text).lower()
+    return " ".join(re.findall(r"[a-z0-9]+", folded))
+
+
+def verify_quotations(answer_text: str, source_map: Dict[str, dict], min_words: int = 4) -> tuple[str, dict]:
+    """Unwrap quotations whose words are not in any source given to the model.
+
+    A quote of ``min_words`` or more words is kept only if it appears verbatim
+    (after normalisation) in some source passage; each part of an elided quote
+    ("a ... b") must appear. Otherwise the quotation marks are removed, so the
+    words read as a paraphrase rather than as the teacher's own words. Shorter
+    quoted terms are left alone.
+    """
+    haystack = " | ".join(
+        _quote_key(f"{item.get('parent_text') or ''} {item.get('child_text') or ''}")
+        for key, item in source_map.items()
+        if key != "__order__" and isinstance(item, dict)
+    )
+    stats = {"quotes_checked": 0, "quotes_verbatim": 0, "quotes_unwrapped": 0}
+
+    def _check(match: re.Match) -> str:
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        if len(_quote_key(inner).split()) < min_words:
+            return match.group(0)
+        stats["quotes_checked"] += 1
+        parts = [_quote_key(part) for part in _ELLIPSIS_RE.split(inner)]
+        parts = [part for part in parts if len(part.split()) >= 2] or [_quote_key(inner)]
+        if all(part in haystack for part in parts):
+            stats["quotes_verbatim"] += 1
+            return match.group(0)
+        stats["quotes_unwrapped"] += 1
+        return inner
+
+    return _QUOTED_SPAN_RE.sub(_check, answer_text), stats
+
+
 def _finalize_answer_state(
     *,
     query: str,
@@ -1277,6 +1346,11 @@ def _finalize_answer_state(
             citation_automap_succeeded = True
 
     explicit_refusal = _is_explicit_refusal(answer_text)
+    if getattr(config, "rag_quote_verification_enabled", False) and not explicit_refusal:
+        answer_text, quote_stats = verify_quotations(
+            answer_text, source_map, min_words=max(1, int(getattr(config, "rag_quote_verification_min_words", 4)))
+        )
+        log_event("quote_verification", span="postprocess", **quote_stats)
     used_ids = [str(item.get("chunk_id")) for item in citations if item.get("chunk_id")]
 
     if explicit_refusal:

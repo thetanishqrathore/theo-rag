@@ -313,3 +313,32 @@ def test_fullwidth_bracket_citations_are_recognized() -> None:
     assert "【" not in normalized
     resolved = gen.resolve_chunk_refs(normalized, {cid: {}})
     assert resolved.count(f"[chunk:{cid}]") == 3
+
+
+def test_finalize_state_unwraps_quotes_missing_from_sources(monkeypatch) -> None:
+    runtime_config = _base_runtime_config(rag_quote_verification_enabled=True, rag_quote_verification_min_words=4)
+    monkeypatch.setattr(gen, "get_config", lambda: runtime_config)
+    chunk = _search_result(
+        child_chunk_id="abcdef12-3456-7890-abcd-ef1234567890",
+        parent_chunk_id="feedface-1111-2222-3333-444444444444",
+        child_text="The creator-creature distinction means God is not identical to creation.",
+        rerank_score=3.5,
+    )
+    source_map = gen.build_source_map([chunk])
+    cite = "[chunk:abcdef12-3456-7890-abcd-ef1234567890]"
+
+    final_state = gen._finalize_answer_state(
+        query="What is the creator creature distinction?",
+        raw_answer_text=(
+            f"He says “God is not identical to creation” {cite}. "
+            f"It is “a boundary no creature can ever cross” {cite}."
+        ),
+        source_map=source_map,
+        requested_mode="confident",
+        parent_chunks=[chunk],
+        config=runtime_config,
+    )
+
+    assert "“God is not identical to creation”" in final_state["answer_text"]
+    assert "It is a boundary no creature can ever cross " in final_state["answer_text"]
+    assert final_state["grounded"] is True

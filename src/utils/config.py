@@ -286,6 +286,11 @@ class AppConfig(BaseSettings):
     rag_bm25_or_fallback_min_hits: int = Field(default=5, validation_alias="RAG_BM25_OR_FALLBACK_MIN_HITS")
     # Keyword search built from the question's informative terms (OR, ranked by
     # term rarity). "legacy" restores the AND-of-every-word query on the rewrite.
+    # Answer rules: partial-coverage answers instead of flat refusals, and
+    # quotation marks only around words found verbatim in the sources.
+    rag_partial_answers_enabled: bool = Field(default=True, validation_alias="RAG_PARTIAL_ANSWERS_ENABLED")
+    rag_quote_verification_enabled: bool = Field(default=True, validation_alias="RAG_QUOTE_VERIFICATION_ENABLED")
+    rag_quote_verification_min_words: int = Field(default=4, validation_alias="RAG_QUOTE_VERIFICATION_MIN_WORDS")
     rag_keyword_query_mode: str = Field(default="weighted_or", validation_alias="RAG_KEYWORD_QUERY_MODE")
     rag_keyword_max_doc_ratio: float = Field(default=0.05, validation_alias="RAG_KEYWORD_MAX_DOC_RATIO")
     rag_keyword_max_terms: int = Field(default=8, validation_alias="RAG_KEYWORD_MAX_TERMS")
