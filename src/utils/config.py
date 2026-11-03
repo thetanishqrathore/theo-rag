@@ -284,6 +284,11 @@ class AppConfig(BaseSettings):
     rag_parent_diversity_stable: bool = Field(default=False, validation_alias="RAG_PARENT_DIVERSITY_STABLE")
     rag_bm25_or_fallback_enabled: bool = Field(default=False, validation_alias="RAG_BM25_OR_FALLBACK_ENABLED")
     rag_bm25_or_fallback_min_hits: int = Field(default=5, validation_alias="RAG_BM25_OR_FALLBACK_MIN_HITS")
+    # Keyword search built from the question's informative terms (OR, ranked by
+    # term rarity). "legacy" restores the AND-of-every-word query on the rewrite.
+    rag_keyword_query_mode: str = Field(default="weighted_or", validation_alias="RAG_KEYWORD_QUERY_MODE")
+    rag_keyword_max_doc_ratio: float = Field(default=0.05, validation_alias="RAG_KEYWORD_MAX_DOC_RATIO")
+    rag_keyword_max_terms: int = Field(default=8, validation_alias="RAG_KEYWORD_MAX_TERMS")
     rag_child_dedup_enabled: bool = Field(default=False, validation_alias="RAG_CHILD_DEDUP_ENABLED")
     rag_child_dedup_jaccard_threshold: float = Field(
         default=0.92, validation_alias="RAG_CHILD_DEDUP_JACCARD_THRESHOLD"
