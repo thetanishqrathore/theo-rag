@@ -192,6 +192,8 @@ npm --prefix frontend ci && npm --prefix frontend run build
 .venv/bin/uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 1
 # or install the boot-time service:  scripts/ops/install_service.sh
 ```
+Once the service is installed, `./theorag.sh start|stop|restart|status`
+controls the whole system (containers, API, Cloudflare Tunnel, GPU memory).
 The API serves the web UI at `http://localhost:8000/` (and on the LAN address);
 `/api/*` and the `/static/*` evidence routes are unchanged. For UI development,
 `npm --prefix frontend run dev` serves on :5173 against the API on :8000.
