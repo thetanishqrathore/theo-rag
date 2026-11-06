@@ -13,7 +13,9 @@ from pathlib import Path
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
 from src.api.routes import router, set_models
+from src.db.session import get_sessionmaker
 from src.observability.middleware import RequestLoggingMiddleware
+from src.retrieval.retrieve import warm_keyword_term_stats
 from src.utils.config import get_config
 from src.utils.logging import setup_logging
 from src.utils.ollama_client import warm_ollama_models, unload_ollama_models
@@ -94,6 +96,16 @@ async def startup() -> None:
     reranker = CrossEncoder(config.reranker_model, device=device)
     set_models(embedder, reranker)
     log.info("models_loaded", device=device)
+    if config.rag_keyword_query_mode == "weighted_or":
+        # Term frequencies for keyword ranking: a few seconds once, not on the first question.
+        session = get_sessionmaker()()
+        try:
+            warm_keyword_term_stats(session)
+            log.info("keyword_term_stats_loaded")
+        except Exception as exc:  # search still works; the first query computes them
+            log.warning("keyword_term_stats_failed", error=str(exc))
+        finally:
+            session.close()
     if config.ollama_warm_on_startup:
         warm_ollama_models(
             [config.ollama_model, config.secondary_ollama_model],

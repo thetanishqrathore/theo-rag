@@ -413,11 +413,127 @@ def _bm25_sql(tsquery_expr: str) -> Any:
     )
 
 
+# Lexemes (english stems) that name a teacher or describe the question rather
+# than its subject. Without them, "How does Pastor Dean describe X" searches for X.
+KEYWORD_META_LEXEMES = frozenset(
+    {
+        "pastor", "dean", "robert", "bob", "clough", "charl", "teacher", "teach", "taught",
+        "describ", "explain", "evalu", "assess", "discuss", "mention", "say", "said", "view",
+        "accord", "summar", "defin", "mean", "regard", "relat", "connect", "distinguish",
+        "contrast", "compar", "critiqu", "corpus", "lesson", "transcript", "use",
+    }
+)
+_LEXEME_RE = re.compile(r"^[a-z0-9]+$")
+_term_stats_cache: dict[int, tuple[int, dict[str, int]]] = {}
+_term_stats_lock = Lock()
+
+
+def corpus_term_stats(corpus_id: int, session: Session) -> tuple[int, dict[str, int]]:
+    """Return (child chunk count, lexeme -> chunks containing it) for a corpus.
+
+    Computed once per process with ts_stat (a few seconds for Dean) and cached;
+    the corpus only changes through a rebuild, after which the service restarts.
+    """
+    with _term_stats_lock:
+        cached = _term_stats_cache.get(corpus_id)
+        if cached is not None:
+            return cached
+        total = session.execute(
+            sql_text("SELECT count(*) FROM child_chunks WHERE corpus_id = :corpus_id"), {"corpus_id": corpus_id}
+        ).scalar_one()
+        inner = f"SELECT to_tsvector('english', content) FROM child_chunks WHERE corpus_id = {int(corpus_id)}"
+        rows = session.execute(sql_text("SELECT word, ndoc FROM ts_stat(:inner)"), {"inner": inner}).all()
+        stats = (int(total), {str(word): int(ndoc) for word, ndoc in rows})
+        _term_stats_cache[corpus_id] = stats
+        return stats
+
+
+def warm_keyword_term_stats(session: Session) -> None:
+    for corpus_id in session.execute(select(Corpus.id)).scalars():
+        corpus_term_stats(int(corpus_id), session)
+
+
+def select_keyword_terms(
+    lexemes: list[str], total: int, doc_freq: dict[str, int], max_ratio: float, max_terms: int
+) -> list[tuple[str, float]]:
+    """Pick the question's informative lexemes and weight each by its rarity (IDF).
+
+    Lexemes found in more than ``max_ratio`` of the corpus' chunks carry little
+    signal ("christ", "paul") and are dropped; if every term is that common, the
+    two rarest are kept so a keyword search still runs.
+    """
+    candidates = sorted(
+        {
+            lexeme
+            for lexeme in lexemes
+            if _LEXEME_RE.match(lexeme) and lexeme not in KEYWORD_META_LEXEMES and doc_freq.get(lexeme, 0) > 0
+        },
+        key=lambda lexeme: (doc_freq[lexeme], lexeme),
+    )
+    limit = max(1, int(total * max_ratio))
+    chosen = [lexeme for lexeme in candidates if doc_freq[lexeme] <= limit] or candidates[:2]
+    return [(lexeme, math.log(total / (1 + doc_freq[lexeme]))) for lexeme in chosen[: max(1, max_terms)]]
+
+
+def _weighted_keyword_sql(term_count: int) -> Any:
+    """BM25-style SELECT: chunks containing any term, ranked by the summed IDF of the
+    terms they contain. Each term is one GIN index lookup (no per-row tsvector work);
+    only bound parameters reach the query."""
+    per_term = " UNION ALL ".join(
+        f"SELECT id, CAST(:w{i} AS float) AS w FROM child_chunks "
+        f"WHERE corpus_id = :corpus_id AND to_tsvector('english', content) @@ to_tsquery('simple', :t{i})"
+        for i in range(term_count)
+    )
+    return sql_text(
+        f"""
+        WITH hits AS (
+            SELECT id, sum(w) AS rank FROM ({per_term}) AS term_hits
+            GROUP BY id
+            ORDER BY rank DESC, id
+            LIMIT :limit
+        )
+        SELECT cc.id, cc.parent_chunk_id, pc.lesson_id, hits.rank, ft.name AS source_tag, cc.metadata_json
+        FROM hits
+        JOIN child_chunks cc ON cc.id = hits.id
+        JOIN parent_chunks pc ON cc.parent_chunk_id = pc.id
+        JOIN lessons l ON pc.lesson_id = l.id
+        JOIN source_files sf ON l.source_file_id = sf.id
+        JOIN file_tags ft ON sf.file_tag_id = ft.id
+        ORDER BY hits.rank DESC, cc.id
+        """
+    )
+
+
+def _search_keywords_weighted(query: str, corpus_id: int, session: Session, limit: int, config) -> list:
+    lexemes = session.execute(
+        sql_text("SELECT lexeme FROM unnest(to_tsvector('english', :query))"), {"query": query}
+    ).scalars().all()
+    total, doc_freq = corpus_term_stats(corpus_id, session)
+    terms = select_keyword_terms(
+        list(lexemes),
+        total,
+        doc_freq,
+        float(config.rag_keyword_max_doc_ratio),
+        int(config.rag_keyword_max_terms),
+    )
+    log_event("keyword_terms_selected", span="retrieval", terms=[term for term, _ in terms])
+    if not terms:
+        return []
+    params: dict[str, Any] = {"corpus_id": corpus_id, "limit": limit}
+    for i, (term, weight) in enumerate(terms):
+        params[f"t{i}"] = term
+        params[f"w{i}"] = weight
+    return session.execute(_weighted_keyword_sql(len(terms)), params).all()
+
+
 def search_bm25(query: str, corpus: str, session: Session, limit: int = 120) -> List[dict]:
     corpus_id = session.execute(select(Corpus.id).where(Corpus.name == corpus)).scalar_one_or_none()
     if corpus_id is None:
         return []
     config = get_config()
+    if config.rag_keyword_query_mode == "weighted_or":
+        rows = _search_keywords_weighted(query, int(corpus_id), session, limit, config)
+        return _bm25_rows_to_items(rows)
     sql = _bm25_sql("plainto_tsquery('english', :query)")
     rows = session.execute(sql, {"query": query, "limit": limit, "corpus_id": corpus_id}).all()
     if getattr(config, "rag_bm25_or_fallback_enabled", False) and len(rows) < max(
@@ -430,6 +546,10 @@ def search_bm25(query: str, corpus: str, session: Session, limit: int = 120) -> 
                 {"or_query": or_query, "limit": limit, "corpus_id": corpus_id},
             ).all()
             rows = _merge_bm25_rows(rows, or_rows)
+    return _bm25_rows_to_items(rows)
+
+
+def _bm25_rows_to_items(rows: list) -> List[dict]:
     items: list[dict] = []
     for row in rows:
         meta_fields = _extract_chunk_meta_fields(row[5] if isinstance(row[5], dict) else None)
@@ -1087,6 +1207,9 @@ def retrieve_context_with_stats(
     # Normalized again here because the rewrite may be disabled or fail and fall
     # back to the raw user query.
     retrieval_query = normalize_search_text(rewrite_query(query, history=history)).strip() or query
+    # Keywords come from the question itself; the rewrite adds teacher names and
+    # filler. Follow-ups still use the rewrite, which resolves "he" and "that".
+    keyword_query = query if config.rag_keyword_query_mode == "weighted_or" and not history else retrieval_query
     mode = _resolve_retrieval_mode(corpus, retrieval_mode, config)
     ef_search = config.qdrant_ef_search_fast if mode == "fast" else config.qdrant_ef_search_deep
     search_k_fast = max(1, int(config.rag_query_search_k_fast))
@@ -1149,7 +1272,7 @@ def retrieve_context_with_stats(
                 qdrant_future = executor.submit(
                     search_qdrant, query_vector, corpus, client, search_k, ef_search
                 )
-                bm25_future = executor.submit(search_bm25_isolated, retrieval_query, corpus, bm25_limit)
+                bm25_future = executor.submit(search_bm25_isolated, keyword_query, corpus, bm25_limit)
                 vector_candidates = qdrant_future.result()
                 bm25_candidates = bm25_future.result()
                 log_event(
@@ -1177,7 +1300,7 @@ def retrieve_context_with_stats(
             )
             if config.rag_hybrid_retrieval:
                 bm25_start = time.perf_counter()
-                bm25_candidates = search_bm25(retrieval_query, corpus, session, limit=bm25_limit)
+                bm25_candidates = search_bm25(keyword_query, corpus, session, limit=bm25_limit)
                 log_event(
                     "bm25_search_end",
                     span="retrieval",
