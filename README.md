@@ -60,14 +60,16 @@ theological accuracy.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Offline["Offline: build the corpus"]
+        direction LR
         A[Source files<br/>HTML · PDF · DOC · RTF] --> B[Extract + validate] --> C[Parent and child chunks] --> D[Embed + index]
     end
     subgraph Online["Online: answer a question"]
-        Q[Question] --> R[Hybrid retrieval<br/>dense + keyword] --> S[Rerank] --> G[Sufficiency gate] --> L[GPT-OSS 120B<br/>grounded answer] --> P[Citation + quote checks] --> UI[Streamed answer<br/>with sources]
+        direction LR
+        Q[Question] --> R[Hybrid retrieval<br/>+ rerank] --> G[Sufficiency gate] --> L[GPT-OSS 120B<br/>grounded answer] --> P[Citation and<br/>quote checks] --> UI[Streamed answer<br/>with sources]
     end
-    D -.-> R
+    Offline -->|indexed passages| Online
 ```
 
 **Offline.** Every source file is inventoried in a manifest with an include or
