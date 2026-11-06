@@ -1,9 +1,11 @@
 # Architecture
 
 A deep dive into how `theo-rag` turns a pile of long-form documents into a
-grounded, citable question-answering system that runs entirely on-premises.
+grounded, citable question-answering system that runs on a single on-premises
+GPU workstation.
 
 - [Design goals](#design-goals)
+- [Models](#models)
 - [Data model](#data-model)
 - [Offline pipeline — content build](#offline-pipeline--content-build)
 - [Parent/child chunking](#parentchild-chunking)
@@ -27,9 +29,25 @@ non-negotiable:
 1. **Grounded** — the model generates only from retrieved corpus evidence.
 2. **Cited** — claims resolve to `[chunk:<id>]` references backed by source metadata.
 3. **Honest** — the system refuses or narrows when evidence is insufficient.
-4. **Private** — everything runs locally; no data leaves the host.
+4. **Private** — documents, embeddings and inference stay on the host. Only
+   questions and answers cross the network, through an outbound tunnel.
 
 Everything below is downstream of those four goals.
+
+---
+
+## Models
+
+All models run locally on one GPU (reference: NVIDIA RTX PRO 6000 Blackwell, 96 GB).
+
+| Role | Model | Notes |
+| --- | --- | --- |
+| Generation, query rewrite | `gpt-oss:120b` via Ollama | MXFP4, about 65 GB on disk; 32k context; temperature 0.1 |
+| Embeddings | `BAAI/bge-m3` | 1,024-dimensional dense vectors for child chunks and queries |
+| Reranking | `BAAI/bge-reranker-large` | cross-encoder that scores every (query, passage) pair |
+
+GPT-OSS is a reasoning model. Its reasoning tokens are streamed only as
+`status` heartbeats and never reach answers, citations or telemetry.
 
 ---
 
@@ -139,49 +157,137 @@ Notable control-flow details:
 
 ## Hybrid retrieval
 
-Retrieval combines complementary signals and then refines the candidate set:
+Retrieval combines two complementary searches and then refines the candidate
+set (`src/retrieval/retrieve.py`, `retrieve_context_with_stats`):
 
-1. **Dense vector search** (Qdrant) — semantic similarity over child-chunk
-   embeddings.
-2. **Lexical search** (PostgreSQL full-text, BM25-style ranking) — exact-term
-   and rare-term recall that dense retrieval misses. An optional **OR-fallback**
-   widens the `tsquery` when a strict match returns too few hits.
-3. **Fusion** — dense and lexical result lists are merged. **Reciprocal Rank
-   Fusion (RRF)** combines them by rank rather than raw score, avoiding
-   score-scale mismatch between the two systems.
-4. **Reranking + expansion** — candidates are reranked, with stable tie-breaking
-   so equal-scored results have a deterministic order (important for
-   reproducible evals).
-5. **Near-duplicate dedup** — highly overlapping child chunks (Jaccard over token
-   sets) are collapsed so the context window isn't spent on repeats.
-6. **Parent diversity** — results are diversified across parent chunks so the
-   evidence set covers breadth, not one section repeated.
-7. **Hierarchy-aware boost** *(optional)* — when structural metadata
-   (`node_path` / `section_path`) exists, retrieval can apply a **positive-only**
-   rerank bonus. When it's missing (common in flat transcripts) there is **no
-   penalty** — ranking stays neutral.
+```mermaid
+flowchart LR
+    Q[Question] --> RW[LLM rewrite<br/>for vector search]
+    RW --> V[Dense search<br/>Qdrant, 220–320 hits]
+    Q --> K[Keyword search<br/>PostgreSQL, rare terms]
+    V --> U[Union]
+    K --> U
+    U --> R[Cross-encoder rerank]
+    R --> W[Weighting, hierarchy boost,<br/>parent + source diversity]
+    W --> T[Top-k child chunks<br/>→ their parent chunks]
+```
 
-Retrieval caches use a generic LRU implementation to avoid recomputing hot
-queries. Many of these refinements (RRF, stable tie-breaks, OR-fallback, dedup,
-hierarchy boost) are **flag-gated** — see [feature flags](#configuration--feature-flags).
+1. **Query rewrite.** The LLM rewrites a vague or conversational question (and
+   its history) into a precise retrieval query for dense search and reranking.
+2. **Dense vector search** (Qdrant). Semantic similarity over child-chunk
+   embeddings: 220 candidates in `fast` mode and 320 in `deep` mode.
+3. **Keyword search** (PostgreSQL full-text). This recovers exact and rare terms
+   (names, Greek words, technical vocabulary) that dense search misses. See below.
+4. **Union.** Candidates from both searches are merged by child-chunk ID.
+   Reciprocal Rank Fusion is available behind a flag.
+5. **Reranking.** A cross-encoder scores every candidate against the query.
+   This is the most expensive step and the strongest relevance signal.
+6. **Refinement.** This step has several parts:
+   - **Weighting** favours dense, definition-like passages.
+   - **Hierarchy boost** gives a positive-only bonus when structural metadata
+     (`node_path` / `section_path`) exists. Flat transcripts get no penalty.
+   - **Parent diversity** stops one section from filling the context.
+   - **Source diversity** spreads the evidence across lessons.
+   - *Optional:* near-duplicate collapse (Jaccard over token sets).
+7. **Context.** The top-k child chunks are expanded to their parent chunks. The
+   parents become the prompt's evidence and the citation targets.
+
+### Keyword search
+
+The keyword query is built from the user's **original question**, not from the
+LLM rewrite. When the question has a conversation history it uses the rewrite,
+which resolves pronouns.
+
+1. PostgreSQL's English parser turns the question into lexemes, the stemmed
+   words it indexes (`twelve` → `twelv`).
+2. The following are dropped:
+   - teacher names and question-framing words ("pastor", "explain", "teach",
+     "compare", …);
+   - lexemes the corpus does not contain;
+   - lexemes found in more than 5% of the corpus's passages, which carry
+     almost no signal.
+
+   At most 8 terms are kept, the rarest first.
+3. Each term gets an inverse-document-frequency weight,
+   `log(total passages / (1 + passages containing it))`.
+4. A passage's score is the sum of the weights of the terms it contains. Each
+   term is a separate lookup on the GIN index of `to_tsvector('english', content)`,
+   so a search takes about 10 ms.
+
+Per-term passage counts come from `ts_stat` once per process. The API loads
+them at startup, which takes about 6 s for both corpora.
+
+Why this design: the original query AND-ed every word of the long LLM rewrite
+(`plainto_tsquery`), so a passage had to contain all of them, and 96% of
+benchmark questions got no keyword hits at all. Weighting by rarity is the idea
+behind BM25's IDF term. A question about *Nestorius* now ranks the rare passages
+that name him above the thousands that merely say *Christ*.
+`RAG_KEYWORD_QUERY_MODE=legacy` restores the old behaviour.
+
+Retrieval caches (query embeddings, rerank scores) use an LRU to avoid
+recomputing hot queries.
 
 ---
 
 ## Grounded generation
 
-Before any tokens are generated, an **evidence-sufficiency gate** classifies the
-query given the retrieved evidence:
+Before any tokens are generated, an **evidence-sufficiency gate**
+(`evaluate_sufficiency` in `src/generation/generate.py`) classifies the query
+given the retrieved evidence:
 
 | Mode | Meaning |
 | --- | --- |
-| `confident` | Strong evidence — answer normally. |
-| `narrow` | Partial evidence — answer, but scope down / hedge. |
-| `refuse` | Insufficient evidence — decline rather than fabricate. |
+| `confident` | Strong evidence: answer normally. |
+| `narrow` | Partial evidence: answer only the supported part and say which parts are unsupported. |
+| `refuse` | Insufficient evidence: return exactly *"I cannot support that claim from this corpus."* |
 
-When generation proceeds, the model is prompted to cite chunks inline as
-`[chunk:<uuid>]`. Output then passes through post-processing:
+The gate looks at two signals:
+- the top reranker score `s1`, squashed with a sigmoid;
+- the lexical overlap between the query and the top passage.
 
+`confident` needs `s1 ≥ t_high`, or `s1 ≥ t_mid` with overlap ≥ `o_mid`.
+`refuse` needs both `s1 < t_low` and overlap < `o_low`. Everything else is
+`narrow`. The thresholds are per corpus (`RAG_SUFFICIENCY_*`). A question that
+explicitly asks for material outside the corpus ("… not covered in this
+corpus") is refused here, before the model runs.
+
+### The prompt's answer rules
+
+When generation proceeds, the model receives the parent chunks as numbered
+evidence. It is told to cite inline as `[chunk:<uuid>]` and to follow these
+rules:
+
+- **Partial coverage.** If the question asks about something the sources do not
+  contain, but they do address the related subject, the model says so in one
+  sentence and then answers what the teacher does teach, with citations. It
+  does not refuse.
+- **Silence.** The exact refusal sentence is used only when nothing in the
+  sources is relevant to any part of the question.
+- **No imported facts.** The model never attributes to the teacher a name, term
+  or detail that is absent from the sources, even when it knows it from
+  elsewhere.
+- **Quotations.** Quotation marks go only around words copied verbatim from
+  one source (about 25 words at most), with that source's citation right after
+  the closing mark. Paraphrase takes no quotation marks.
+
+`RAG_PARTIAL_ANSWERS_ENABLED=false` restores the older rule set, which refused
+whenever coverage was incomplete.
+
+### Post-processing
+
+Output then passes through post-processing:
+
+- **Quotation check.** This runs for both endpoints. For every quoted span of 4
+  or more words, both the quote and the sources are normalised (Unicode NFKC,
+  lower case, punctuation and hyphen variants removed). A quote that shortens
+  the original with `…` must have every one of its parts found. A quote found
+  in no source passage given to the model loses its quotation marks: the words
+  stay, but they are no longer presented as the teacher's. Counts are logged as
+  `quote_verification`. Disable with `RAG_QUOTE_VERIFICATION_ENABLED=false`.
 - **Citation normalization / extraction** — parse and canonicalize citation refs.
+  GPT-OSS's fullwidth forms (`【chunk:…】`), 8-character prefixes and IDs
+  miscopied by one or two characters are resolved to the evidence actually
+  provided.
 - **Citation retry / auto-map** — if the model under-cites or emits refs that
   don't resolve, an optional retry or automatic mapping step repairs coverage.
 - **Citation coverage guardrail** — measures the fraction of sentences that are
@@ -238,23 +344,32 @@ Configuration is centralized in `src/utils/config.py` (`AppConfig`,
 `pydantic-settings`), exposing grouped views (`database`, `vector_store`,
 `sufficiency`) over flat environment keys.
 
-Retrieval-quality improvements are introduced **behind flags that default to
-prior behavior**, so upgrading the code changes nothing until a flag is flipped.
-Representative flags:
+Every behaviour change ships **behind a flag**, so it can be switched off
+without a code revert. The flags and their defaults:
 
-```bash
-RAG_RRF_FUSION_ENABLED=false            # reciprocal rank fusion of dense+lexical
-RAG_STABLE_TIEBREAK=false               # deterministic ordering of equal scores
-RAG_PARENT_DIVERSITY_STABLE=false       # stable parent-chunk diversification
-RAG_BM25_OR_FALLBACK_ENABLED=false      # widen tsquery when hits are sparse
-RAG_CHILD_DEDUP_ENABLED=false           # Jaccard near-duplicate collapse
-RAG_HIERARCHY_BOOST_ENABLED=false       # positive-only structural rerank bonus
-RAG_CITATION_GUARDRAIL_ENABLED=false    # enforce citation coverage
-```
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `RAG_KEYWORD_QUERY_MODE` | `weighted_or` | rarity-weighted keyword search; `legacy` = AND of every word of the rewrite |
+| `RAG_KEYWORD_MAX_DOC_RATIO` / `RAG_KEYWORD_MAX_TERMS` | `0.05` / `8` | drop terms in more than 5% of passages; keep at most 8 |
+| `RAG_PARTIAL_ANSWERS_ENABLED` | `true` | partial-coverage answer rules and the out-of-corpus refusal check |
+| `RAG_QUOTE_VERIFICATION_ENABLED` | `true` | strip quotation marks from quotes not found in the sources |
+| `RAG_QUOTE_VERIFICATION_MIN_WORDS` | `4` | shortest quote that is checked |
+| `RAG_QUERY_REWRITE_ENABLED` | `true` | LLM query rewrite for dense search |
+| `RAG_HYBRID_RETRIEVAL` | `true` | dense + keyword search (false = dense only) |
+| `RAG_HIERARCHY_BOOST_ENABLED` | `true` | positive-only structural rerank bonus |
+| `RAG_RETRIEVE_PARENT_DIVERSITY` | `true` | cap results per parent chunk |
+| `RAG_CITATION_GUARDRAIL_ENABLED` / `_LOG_ONLY` | `true` / `true` | measure citation coverage; log only, never block |
+| `RAG_FOLLOWUPS_ENABLED` | `true` | suggested follow-up questions |
+| `RAG_RRF_FUSION_ENABLED` | `false` | reciprocal rank fusion instead of a plain union |
+| `RAG_BM25_OR_FALLBACK_ENABLED` | `false` | legacy mode only: widen the query when hits are sparse |
+| `RAG_CHILD_DEDUP_ENABLED` | `false` | Jaccard near-duplicate collapse |
+| `RAG_STABLE_TIEBREAK`, `RAG_PARENT_DIVERSITY_STABLE` | `false` | deterministic ordering of equal scores |
 
-This enables a disciplined rollout: deploy with defaults, reindex if a flag
-needs new payload (e.g. `section_path`), enable in staging, watch
-error/refusal/coverage/latency deltas, then enable in production.
+Rollout discipline: change one thing, run the benchmark, compare with the
+baseline ([`EVALUATION.md`](EVALUATION.md)), and only then change the default.
+Flags that change *processing* (chunk sizes, extraction) also change the
+build's provenance stamp, so the build can tell which lessons were built
+under another configuration.
 
 ---
 
@@ -262,8 +377,8 @@ error/refusal/coverage/latency deltas, then enable in production.
 
 The reference deployment is a single on-prem GPU workstation:
 
-- **Ollama** serves the generation model on the local GPU (reference hardware:
-  NVIDIA RTX PRO 6000, large enough to hold a 70B model resident).
+- **Ollama** serves GPT-OSS 120B on the local GPU (reference hardware: NVIDIA
+  RTX PRO 6000 Blackwell, 96 GB; 77–89 GB in use while serving).
 - **Qdrant** and **PostgreSQL + pgvector** run as local containers
   (`docker-compose.yml`).
 - The **FastAPI** backend and **Vite**-built frontend are served locally.
@@ -271,16 +386,25 @@ The reference deployment is a single on-prem GPU workstation:
   **without opening any inbound ports** — outbound-only, with hostnames mapped to
   local services. See `docs/cloudflare_tunnel_setup.md`.
 
-The result: users reach the app over the internet, but every document, every
-embedding, and every token of inference stays on the local machine.
+The result: users reach the app over the internet, while documents,
+embeddings and inference stay on the local machine. Questions and answers do
+travel through Cloudflare's network, so this is not an air-gapped deployment.
 
 ---
 
 ## Design decisions & trade-offs
 
-- **Refuse over hallucinate.** The sufficiency gate deliberately sacrifices
-  coverage for trustworthiness. For specialized corpora that's the right trade;
-  a confident wrong answer is the worst outcome.
+- **Refuse over hallucinate, but say what *is* there.** The sufficiency gate
+  still refuses when the evidence is weak. When the corpus covers part of a
+  question, an answer that names the gap and gives the covered part is more
+  useful than a flat refusal, and more honest than a guess.
+- **Deterministic checks over prompt instructions** where a rule must always
+  hold. A prompt could not make the model both answer partial questions and
+  refuse explicit out-of-corpus requests reliably, so the refusal is a pattern
+  check before generation. Likewise, quotations are verified in code rather
+  than trusted to the prompt.
+- **Keyword search from the user's words.** The LLM rewrite helps dense search
+  but dilutes exact terms, so keyword search uses the original question.
 - **Two chunk layers instead of one.** More build complexity and storage, but it
   decouples retrieval precision from citation/context quality — you can't get
   both from a single chunk size.
