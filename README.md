@@ -1,273 +1,224 @@
 # theo-rag
 
-**Evidence-first, on-prem Retrieval-Augmented Generation for theological (and other specialized) corpora.**
+**Evidence-first question answering over specialised teaching archives, running
+on one on-premises GPU workstation.**
 
+[![CI](https://github.com/thetanishqrathore/theo-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/thetanishqrathore/theo-rag/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-Vite%20%2B%20TS-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Qdrant](https://img.shields.io/badge/Qdrant-1.7-DC244C?logo=qdrant&logoColor=white)](https://qdrant.tech/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
-[![Ollama](https://img.shields.io/badge/LLM-Ollama%20(local)-000000?logo=ollama&logoColor=white)](https://ollama.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`theo-rag` is an evidence-first RAG system that answers questions over a
-curated document corpus **only from retrieved evidence**. Answers cite the
-passages they draw on with resolvable `[chunk:<id>]` citations, and the system
-**narrows or refuses when the evidence is weak** rather than guessing.
+Ask a question about a teacher's body of work and `theo-rag`:
 
-What is and is not guaranteed: the confident / narrow / refuse decision is a
-heuristic over reranker scores and lexical overlap, and `grounded=true` means
-the answer carries valid citations to the evidence it was given. It is not
-an automatic proof that every sentence follows from the cited passage. A narrow
-answer without citations is returned with `grounded=false` and
-`grounding_reason="uncited_narrow"`. Expert review remains the standard for
+1. finds the exact passages that address it,
+2. answers **only from those passages**, citing each claim as a clickable
+   `[chunk:<id>]` source,
+3. says plainly what the sources do not cover, and refuses when nothing
+   relevant exists.
+
+The reference deployment serves two theological archives: Charles A. Clough's
+transcripts and course notes, and Pastor Dean's Bible-book lessons and
+topical studies. That's 2,502 source documents, indexed as 95,382 searchable
+passages. The pipeline itself works for any collection of long-form documents.
+
+---
+
+## Contents
+
+- [What makes it evidence-first](#what-makes-it-evidence-first)
+- [How it works](#how-it-works)
+- [Measured quality](#measured-quality)
+- [Quickstart](#quickstart)
+- [API](#api)
+- [Documentation](#documentation)
+- [Project layout](#project-layout)
+- [Status and roadmap](#status-and-roadmap)
+
+---
+
+## What makes it evidence-first
+
+| Property | How it is enforced |
+| --- | --- |
+| **Grounded** | The model sees only retrieved passages. It must not add names, terms or details that the sources lack. |
+| **Cited** | Answers cite passages inline. Every citation resolves to a stored passage with its lesson, series and source file. |
+| **Honest about gaps** | A sufficiency gate decides `confident`, `narrow` or `refuse` before generation. Partly covered questions get the covered part plus an explicit note of what is missing. |
+| **Faithful quotations** | Quoted text is checked against the sources after generation, and quotation marks are removed from anything not found word for word. |
+| **Measured** | A fixed 200-case benchmark with hard and soft gates runs before every behaviour change ([`docs/EVALUATION.md`](docs/EVALUATION.md)). |
+| **Private** | Documents, embeddings and all inference stay on the workstation. Public access goes through an outbound Cloudflare Tunnel; no inbound ports are opened. |
+
+What this does **not** claim: `grounded=true` means the answer carries valid
+citations to the evidence it was given. It is not an automatic proof that every
+sentence follows from the cited passage. Expert review remains the standard for
 theological accuracy.
 
-It is designed to run **entirely on-premises** — local LLM (Ollama), local
-embeddings (SentenceTransformers), local vector search (Qdrant), local
-relational store (PostgreSQL + pgvector). No document ever leaves the machine.
-The reference deployment runs on a single workstation with an **NVIDIA RTX PRO
-6000** GPU serving GPT-OSS 120B.
-
-The reference corpora are two theological teaching archives (the *Clough* and
-*Dean* corpora), but the pipeline is corpus-agnostic: point it at any collection
-of long-form documents.
-
 ---
 
-## Why evidence-first?
-
-General-purpose LLMs are confidently wrong about specialized material. For
-domains where correctness and attribution matter — legal, medical, financial,
-scholarly, theological — a fluent-but-unsourced answer is worse than no answer.
-`theo-rag` is built around four hard constraints:
-
-| Constraint | How it's enforced |
-| --- | --- |
-| **Grounded** | Answers are generated *only* from retrieved corpus chunks. |
-| **Cited** | Every sentence should resolve to a `[chunk:<id>]` citation backed by source metadata. |
-| **Honest** | An evidence-**sufficiency gate** classifies each query `confident` / `narrow` / `refuse` before generation. |
-| **Private** | Fully self-hosted; runs air-gapped on on-prem GPU hardware. |
-
----
-
-## Highlights
-
-- **Hybrid retrieval** — dense vector search (Qdrant) fused with lexical search
-  (PostgreSQL full-text / BM25-style ranking), followed by a reranking and
-  candidate-expansion stage.
-- **Parent/child chunk graph** — small *child* chunks are the retrieval unit for
-  precision; larger *parent* chunks are the citation/context unit for
-  faithful, well-scoped answers.
-- **Sufficiency-gated generation** — refuses or narrows scope when evidence is
-  weak, instead of fabricating.
-- **Citation guardrails** — post-generation coverage checks with optional
-  citation retry / auto-mapping when the model under-cites.
-- **Typed streaming protocol** — token-by-token SSE with a stable
-  `status → citations → token → final` contract.
-- **Reproducible evaluation harness** — a fixed 200-case benchmark with
-  gold/silver tiers, deterministic CI checks, and baseline-vs-candidate
-  regression gating.
-- **First-class observability** — structured request logging plus relational
-  telemetry for every query run, rerank, and piece of evidence used.
-- **Flag-gated rollouts** — retrieval-quality improvements ship behind config
-  flags that default to prior behavior, enabling safe staged enablement.
-
----
-
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
-    subgraph Client
-        UI[React + Vite UI]
+    subgraph Offline["Offline: build the corpus"]
+        A[Source files<br/>HTML · PDF · DOC · RTF] --> B[Extract + validate] --> C[Parent and child chunks] --> D[Embed + index]
     end
-    subgraph API["FastAPI service"]
-        R[/api/query · /api/query/stream/]
+    subgraph Online["Online: answer a question"]
+        Q[Question] --> R[Hybrid retrieval<br/>dense + keyword] --> S[Rerank] --> G[Sufficiency gate] --> L[GPT-OSS 120B<br/>grounded answer] --> P[Citation + quote checks] --> UI[Streamed answer<br/>with sources]
     end
-    subgraph Retrieval
-        Q[(Qdrant<br/>vector search)]
-        P[(PostgreSQL + pgvector<br/>full-text / metadata)]
-    end
-    subgraph Generation
-        O[Ollama<br/>local LLM]
-    end
-    UI -->|SSE| R
-    R --> Retrieval
-    Retrieval -->|ranked evidence| G[Sufficiency gate<br/>+ grounded generation]
-    G --> O
-    O -->|tokens + citations| R
-    R -->|telemetry| P
+    D -.-> R
 ```
 
-The system has two pipelines: an **offline content-build pipeline** that turns
-raw documents into an indexed, retrievable corpus, and an **online query
-pipeline** that serves grounded answers.
+**Offline.** Every source file is inventoried in a manifest with an include or
+exclude reason. The build extracts text, validates it, splits it into
+**parent chunks** (300–600 words, the unit that is cited and shown to the model)
+and **child chunks** (about 150 words, the unit that is searched), embeds the
+children and indexes them. The build is resumable, records its provenance and
+ends with an exact ID-parity check between PostgreSQL and Qdrant.
 
-### Offline — content build
+**Online.** A question is answered in eight steps:
 
-```mermaid
-flowchart LR
-    A[Ingest] --> B[Extract] --> C[Structure] --> D[Validate] --> E[Canonical HTML] --> F[Parent chunk] --> G[Child chunk] --> H[Embed] --> I[Index to Qdrant]
-```
+1. The LLM rewrites it for **dense search** over child-chunk embeddings.
+2. A **keyword search** over the user's own words, weighted by how rare each
+   term is in the corpus, catches names and technical terms that dense search
+   misses.
+3. A **cross-encoder reranks** the combined candidates.
+4. The top passages expand to their parents.
+5. The **sufficiency gate** chooses confident, narrow or refuse.
+6. **GPT-OSS 120B** writes the answer with inline citations.
+7. **Post-processing** normalises citations and verifies quotations.
+8. The answer streams to the UI over SSE: `status` → `citations` → `token`* →
+   `final`. Every run is recorded in telemetry tables.
 
-Each document advances through an explicit status lifecycle, and batch CLIs
-discover work by status:
-
-```
-pending → extracted → structured → validated → chunked → child_chunked → embedded
-```
-
-### Online — query runtime
-
-1. Frontend calls `/api/query/stream` (SSE) or `/api/query` (blocking JSON).
-2. API validates the corpus and short-circuits small-talk.
-3. A concurrency semaphore bounds simultaneous generations.
-4. **Hybrid retrieval** returns ranked evidence + retrieval stats.
-5. The **sufficiency gate** decides `confident` / `narrow` / `refuse`.
-6. **Grounded generation** streams from the local LLM; output is
-   citation-normalized, with optional citation retry/auto-map and a grounding
-   decision.
-7. Optional follow-up questions are generated conditionally.
-8. Per-run telemetry is persisted (`rag_query_runs`, `rag_rerank`,
-   `rag_evidence_used`).
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the deep dive.
-
----
-
-## Tech stack
+Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 | Layer | Technology |
 | --- | --- |
-| API | FastAPI, Uvicorn, Pydantic v2 |
-| Retrieval | Qdrant (vectors), PostgreSQL + pgvector (full-text + metadata) |
-| Embeddings / rerank | SentenceTransformers |
-| Generation | Ollama (`gpt-oss:120b`; optional smaller secondary model for helper calls) |
-| Extraction | PyMuPDF, Docling, Marker 1.x, LibreOffice |
-| Data / ORM | SQLAlchemy 2.0, psycopg2 |
-| Logging | structlog |
-| Frontend | React, Vite, TypeScript, Zustand, Tailwind, Vitest |
-| Infra | Docker Compose, Cloudflare Tunnel (on-prem exposure) |
-| Runtime | On-prem, GPU-accelerated (reference: NVIDIA RTX PRO 6000) |
+| Generation | Ollama · `gpt-oss:120b` (MXFP4, 32k context) |
+| Embeddings · rerank | `BAAI/bge-m3` · `BAAI/bge-reranker-large` (SentenceTransformers) |
+| Search | Qdrant 1.7 (vectors) · PostgreSQL 16 full-text (keywords) |
+| API | FastAPI · Uvicorn · Pydantic v2 · SQLAlchemy 2 · structlog |
+| Extraction | PyMuPDF · Docling · Marker 1.x · LibreOffice |
+| Frontend | React · Vite · TypeScript · Zustand · Tailwind · Vitest |
+| Operations | Docker Compose · systemd user units · Cloudflare Tunnel |
+
+---
+
+## Measured quality
+
+200-case benchmark (100 per corpus), each case run against both endpoints. Full
+definitions and method: [`docs/EVALUATION.md`](docs/EVALUATION.md).
+
+| Metric | Phase 1 baseline | Current `main` |
+| --- | ---: | ---: |
+| Endpoint errors | 0 / 400 | 0 / 400 |
+| Citation IDs that resolve | 100% | 100% |
+| Refusal F1 (refuses exactly when it should) | 0.98 | **1.00** |
+| Anchor recall (expected key terms found in answer or evidence) | 0.61 | **0.63** |
+| Sentences carrying a citation | 0.46 | **0.50** |
+| Answer-mode accuracy | 0.70 | 0.68 |
+| Latency avg / p95 | 11.2 / 17.1 s | 11.5 / 17.7 s |
+
+An expert review of 20 Phase 1 answers found correct teacher attribution in all
+138 cited sentences. It also found weak quotation fidelity (44% verbatim), which
+the quotation check now addresses. What changed between the two columns:
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
 ## Quickstart
 
-Full setup, service management, backup/restore and rollback live in
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md). The short version:
+Requirements:
+- Linux with an NVIDIA GPU (80–90 GB of VRAM to serve GPT-OSS 120B with
+  the embedder and reranker, about 95 GB during a full build)
+- Docker with Compose
+- Python 3.12 with [uv](https://docs.astral.sh/uv/)
+- Node.js 22
+- [Ollama](https://ollama.com/)
+- LibreOffice and Marker 1.x, for DOC/RTF and PDF sources
 
-### Prerequisites
-- Docker + Docker Compose (user in the `docker` group)
-- Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- Node.js 22 (`frontend/.nvmrc`; Vite 7 needs `^20.19.0 || >=22.12.0`)
-- [Ollama](https://ollama.com/) with `gpt-oss:120b` pulled
-- LibreOffice (`soffice`) for DOC/RTF sources and Marker **1.x**
-  (`uv tool install "marker-pdf<2"`) for Dean topical PDFs
+Full setup, service management, backups and rollback:
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
-### 1 · Install and start infrastructure
 ```bash
-uv sync --locked --extra dev               # .venv from uv.lock
-cp .env.public.example .env                # set data paths and tool commands
-docker compose up -d                       # PostgreSQL (pgvector) + Qdrant on 127.0.0.1
-.venv/bin/python scripts/migrate.py        # empty volume: init.sql ran once; this applies migrations
-.venv/bin/python scripts/migrate.py --check
-```
+# 1. Environment and infrastructure
+uv sync --locked --extra dev
+cp .env.public.example .env                 # set data paths and tool commands
+docker compose up -d                        # PostgreSQL + Qdrant on 127.0.0.1
+.venv/bin/python scripts/migrate.py && .venv/bin/python scripts/migrate.py --check
+ollama pull gpt-oss:120b
 
-### 2 · Build the corpus
-```bash
-.venv/bin/python scripts/source_manifest.py --root /path/to/bible_corpus \
+# 2. Build the corpus from your documents (resumable)
+.venv/bin/python scripts/source_manifest.py --root /path/to/corpus \
   --output ~/theo-rag-data/source_manifest.json
 .venv/bin/python scripts/build_corpus.py --manifest ~/theo-rag-data/source_manifest.json \
-  --report-dir ~/theo-rag-data/build_reports       # resumable; re-run after interruptions
-```
-The manifest records every file with an include/exclude reason. The build runs
-ingest → extract → structure → validate → canonical HTML → parent/child chunks →
-embeddings → Qdrant, then checks PostgreSQL/Qdrant parity by chunk ID.
+  --report-dir ~/theo-rag-data/build_reports
 
-### 3 · Run
-```bash
+# 3. Serve the API and the web UI on :8000
 npm --prefix frontend ci && npm --prefix frontend run build
 .venv/bin/uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 1
-# or install the boot-time service:  scripts/ops/install_service.sh
 ```
-Once the service is installed, `./theorag.sh start|stop|restart|status`
-controls the whole system (containers, API, Cloudflare Tunnel, GPU memory).
-The API serves the web UI at `http://localhost:8000/` (and on the LAN address);
-`/api/*` and the `/static/*` evidence routes are unchanged. For UI development,
-`npm --prefix frontend run dev` serves on :5173 against the API on :8000.
 
-### Smoke test
+On the reference machine the whole system (containers, API, tunnel) is
+controlled with one script once the service is installed:
+
+```bash
+./theorag.sh status        # also: start [--local] | stop | restart | logs | boot on|off
+```
+
+Smoke test:
+
 ```bash
 curl -s localhost:8000/api/health
-curl -N http://localhost:8000/api/query/stream \
-  -H "Content-Type: application/json" \
-  -d '{"query":"What is faith-rest?","corpus":"clough","top_k":7}'
+curl -s localhost:8000/api/query -H 'Content-Type: application/json' \
+  -d '{"query":"What is the faith-rest drill?","corpus":"clough","top_k":5}'
 ```
+
+The original teaching documents are **not distributed** with this repository.
+Supply your own to run the pipeline end to end.
 
 ---
 
-## API reference
+## API
 
-| Method & path | Purpose |
+| Method and path | Purpose |
 | --- | --- |
-| `POST /api/query` | Blocking grounded answer (JSON). |
-| `POST /api/query/stream` | SSE stream: `status`, `citations`, `token`, `final`. |
-| `GET /api/health` | Liveness. |
-| `GET /api/collections` | Available corpora / Qdrant collections. |
-| `GET /api/models` · `POST /api/models/pull` · `POST /api/models/keepalive` | Model management. |
-| `POST /api/enrich_citations` | Resolve citation metadata for a set of chunks. |
-| `GET /api/stats` | Corpus + Qdrant point counts. |
-| `GET /api/evidence/{evidence_id}` | Inspect a single retrieved chunk. |
+| `POST /api/query` | Grounded answer as JSON |
+| `POST /api/query/stream` | The same answer as Server-Sent Events: `status`, `citations`, `token`, `final` |
+| `GET /api/health` | PostgreSQL, Qdrant and Ollama status |
+| `GET /api/evidence/{id}` | One passage with its source metadata |
+| `GET /api/stats` | Indexed passages per corpus |
+| `GET /api/collections` · `GET /api/models` | Available corpora and allowed models |
 
-**`POST /api/query` body:** `query` (string), `corpus` (`"clough" | "dean"`),
-`top_k` (1–20, default 5), optional `model`, `retrieval_mode` (`"fast" | "deep"`),
-and `history`. Pass an `X-Session-Id` header to correlate telemetry.
+Request body: `query`, `corpus` (`"clough"` or `"dean"`), `top_k` (1–20,
+default 5), optional `retrieval_mode` (`"fast"` or `"deep"`) and `history`. Send
+`X-Session-Id` to correlate telemetry.
 
----
+The JSON response carries:
+- `answer`
+- `citations` (with lesson, series and source metadata)
+- `grounded`
+- `refusal`
+- `follow_up_questions`
+- timings
 
-## Evaluation
-
-Answer quality is measured against a **fixed, versioned benchmark** rather than
-vibes:
-
-- **200 cases** — 100 `clough` + 100 `dean`; 90 `gold` + 110 `silver`.
-- Each case declares expected mode, refusal expectations, minimum citations,
-  hierarchy policy, and gold/silver acceptance rules.
-- Deterministic CI checks validate the dataset and the streaming contract.
-- A gate comparator scores **baseline vs candidate** and can hard-fail on
-  regressions.
-
-```bash
-# Run the benchmark against a live API
-python scripts/eval_suite.py \
-  --api-base http://localhost:8000 \
-  --input eval/benchmark/v1_cases.jsonl \
-  --mode both
-
-# Compare a candidate run against a baseline and gate on regressions
-python scripts/eval_compare.py \
-  --baseline baseline_summary.json \
-  --candidate candidate_summary.json \
-  --output gate_verdict.json \
-  --fail-on-hard
-```
-
-Per-run artifacts (`summary.json`, `per_case.jsonl`, `metrics_by_corpus.json`,
-`metrics_by_class.json`, `telemetry_join.json`) land under
-`eval/reports/runs/<run_id>/`. See [`eval/README.md`](eval/README.md).
+The stream's `final` event also carries `answer_mode` (`confident`, `narrow` or
+`refuse`).
 
 ---
 
-## Observability
+## Documentation
 
-- **Structured logging** with per-request context (`src/observability`).
-- **Relational telemetry** written via ORM helpers (`src/telemetry`) into
-  `rag_query_runs`, `rag_rerank`, and `rag_evidence_used`.
-- **`GET /api/stats`** exposes Qdrant point counts overall and per corpus.
-- **Evidence inspector** (`GET /api/evidence/{id}`) resolves chunk detail and
-  canonical source paths for debugging retrieval.
+| Document | What it covers |
+| --- | --- |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Data model, build pipeline, retrieval, keyword search, sufficiency gate, prompt rules, quote check, streaming, flags |
+| [`docs/EVALUATION.md`](docs/EVALUATION.md) | The benchmark, every metric's exact definition, running and comparing runs, human review, results |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Setup, corpus build, services, health checks, backup and restore, rollback |
+| [`docs/RESTORATION_NOTES.md`](docs/RESTORATION_NOTES.md) | How the Phase 1 baseline was restored: defects fixed, corpus decisions, measured results |
+| [`docs/cloudflare_tunnel_setup.md`](docs/cloudflare_tunnel_setup.md) | Publishing the UI without opening inbound ports |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed, when, and what it did to the numbers |
+| [`frontend/README.md`](frontend/README.md) | The web UI |
 
 ---
 
@@ -275,43 +226,48 @@ Per-run artifacts (`summary.json`, `per_case.jsonl`, `metrics_by_corpus.json`,
 
 ```
 src/
-├── ingestion/      # ingest raw sources + parse metadata
-├── processing/     # extraction, structure detection, validation, canonical HTML
-├── chunking/       # parent (citation) + child (retrieval) chunking
-├── embedding/      # embedding generation + Qdrant indexing
-├── retrieval/      # hybrid retrieval, fusion, rerank, dedup
-├── generation/     # sufficiency gate + grounded generation + streaming
-├── api/            # FastAPI app, routes, request/response models
-├── corpus/         # corpus registry (typed corpus IDs)
-├── db/             # SQLAlchemy models, session, operations
-├── telemetry/      # telemetry writers
-├── observability/  # logging + request middleware
-└── utils/          # config + logging setup
-frontend/           # React + Vite + TypeScript chat UI
-scripts/            # init.sql, migrations, eval + SQL utilities
-eval/               # benchmark dataset + evaluation harness
-docs/               # architecture + deployment docs
+├── ingestion/      register sources, parse metadata (series, lessons, dates)
+├── processing/     extract, detect structure, validate, canonical HTML, embed, index
+├── chunking/       parent (cited) and child (searched) chunks
+├── retrieval/      dense + keyword search, rerank, diversity, hierarchy boost
+├── generation/     sufficiency gate, prompt, grounded generation, citation and quote checks
+├── api/            FastAPI app and routes
+├── corpus/         corpus registry
+├── db/             SQLAlchemy models and sessions
+├── telemetry/      per-query telemetry writers
+├── observability/  structured logging, request middleware
+└── utils/          configuration (all flags) and logging
+frontend/           React + Vite chat UI
+scripts/            build, migrations, evaluation, operations
+eval/               benchmark cases, schema and labelling guide
+tests/              backend tests (pytest)
+docs/               architecture, evaluation, operations, restoration record
 ```
 
 ---
 
-## On-prem & data sovereignty
+## Status and roadmap
 
-`theo-rag` targets environments where documents are **sensitive or
-proprietary and cannot go to a third-party cloud**. Every model runs locally:
-generation via Ollama, embeddings via SentenceTransformers, vector search via
-Qdrant, and metadata in PostgreSQL. The reference deployment publishes the UI
-and API to the internet through a **Cloudflare Tunnel** (no inbound ports
-opened) while all inference and data stay on the local GPU workstation — see
-[`docs/cloudflare_tunnel_setup.md`](docs/cloudflare_tunnel_setup.md).
+- **Phase 1, done (tag `phase1-baseline`).** The system was restored from its
+  public release:
+  - full corpus built with exact index parity;
+  - reproducible setup;
+  - self-verifying backups;
+  - boot-time services;
+  - a measured benchmark baseline.
+- **Phase 2, in progress.** Three changes are on `main` and measured
+  ([`CHANGELOG.md`](CHANGELOG.md)):
+  - keyword search rebuilt;
+  - partial answers instead of flat refusals;
+  - quotation check.
 
----
+  Next:
+  - **Source text cleanup:** fix lessons indexed with wrong character encoding
+    or hidden word-processor text, then rebuild them.
+  - **Rerank against the user's own question** as well as the LLM rewrite.
+  - **Claim support check:** test each cited sentence against its passage with
+    the reranker.
+  - **Speaker attribution** for guest material inside a teacher's archive.
 
-## License
-
-Released under the [MIT License](LICENSE).
-
-Built by **Tanishq Rathore** — [tanishqrathore.com](https://tanishqrathore.com)
-
-> The original teaching transcripts used to build the production corpora are
-> **not distributed** with this repository.
+Built by **Tanishq Rathore** · [tanishqrathore.com](https://tanishqrathore.com) ·
+released under the [MIT License](LICENSE).

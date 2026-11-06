@@ -5,6 +5,10 @@ from the public release, what was changed and why, and what the first valid
 baseline measured. Behaviour that was deliberately **not** changed is listed
 too.
 
+> This is a historical record of the `phase1-baseline` tag. Changes made since
+> then, and their measured effect, are in [`CHANGELOG.md`](../CHANGELOG.md).
+> Notes marked *Since Phase 1* below point to them.
+
 ## Starting point and references
 
 | Item | Value |
@@ -117,6 +121,8 @@ involved judgement (all confirmed as listed):
   breaks, so their parent chunks exceed the 600-word target (~830 words); child
   chunks are unaffected.
 - Lexical retrieval is PostgreSQL full-text search (`ts_rank_cd`), not BM25.
+  *Since Phase 1:* keyword search now ranks by rarity-weighted terms from
+  the user's question (#3).
 - The sufficiency decision is heuristic, and the citation guardrail is log-only.
 - Optional retrieval experiments (RRF fusion, OR-fallback, child dedup, stable
   tie-break) stay disabled.
@@ -249,7 +255,9 @@ Decided 2026-11-01: quotation fidelity (merge as baseline, fix next), corpus
 decisions 1–8 confirmed, public site stays open without login.
 
 Still open:
-1. Quotation-fidelity fix on its own branch (next).
+1. Quotation-fidelity fix on its own branch (next). *Since Phase 1:* the
+   quotation rules and the post-generation quote check shipped in #3; a repeat
+   of the 20-answer human review has not been done yet.
 2. An independent backup destination (external drive/NAS/remote) for
    `scripts/ops/copy_offsite.sh`; the workstation has one disk.
 3. Cloudflare WAF rate-limiting rule for `/api/query/stream` on

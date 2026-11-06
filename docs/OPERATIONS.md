@@ -136,6 +136,9 @@ curl -s localhost:8000/api/query -H 'Content-Type: application/json' \
   -d '{"query":"What is the faith-rest drill?","corpus":"clough","top_k":7}' | python3 -m json.tool | head -20
 ```
 
+At startup the API loads the embedder and reranker, then the keyword-search
+term statistics for both corpora (about 6 s, logged as
+`keyword_term_stats_loaded`). `/api/health` answers once startup is complete.
 The first answer after a cold start includes loading GPT-OSS (~30 s from disk,
 ~7 s from page cache). Helper calls reuse `OLLAMA_NUM_CTX`, because Ollama
 reloads the model whenever the context size changes.
@@ -205,8 +208,19 @@ database and index from the source files (about 1–2 hours on the reference GPU
 - **Data:** restore the most recent backup taken before the change (section 5).
 - **Model:** pin the model by digest recorded in `docs/RESTORATION_NOTES.md`;
   `ollama list` shows the installed digest.
+- **Behaviour switches:** each Phase 2 change can be turned off in `.env`
+  without a code change. Restart the service afterwards
+  (`systemctl --user restart theo-rag`).
+
+  | Switch | Restores |
+  | --- | --- |
+  | `RAG_KEYWORD_QUERY_MODE=legacy` | the Phase 1 keyword query |
+  | `RAG_PARTIAL_ANSWERS_ENABLED=false` | flat refusals whenever coverage is incomplete |
+  | `RAG_QUOTE_VERIFICATION_ENABLED=false` | no post-generation quote check |
+
+  The full flag list is in [`ARCHITECTURE.md`](ARCHITECTURE.md#configuration--feature-flags).
 - **Experiments:** keep retrieval experiments behind their default-off flags
-  (`RAG_RRF_FUSION_ENABLED`, `RAG_BM25_OR_FALLBACK_ENABLED`, …) and on separate
+  (`RAG_RRF_FUSION_ENABLED`, `RAG_CHILD_DEDUP_ENABLED`, …) and on separate
   branches; compare candidate runs against the baseline with
   `scripts/eval_compare.py`.
 
@@ -217,5 +231,7 @@ database and index from the source files (about 1–2 hours on the reference GPU
   --input eval/benchmark/v1_cases.jsonl --mode both --output-root ~/theo-rag-data/eval_runs
 ```
 
-Run artifacts include corpus text and query logs, so they stay outside Git
-(`eval/reports/` is gitignored).
+A full run takes about 70 minutes and keeps the GPU busy, so public users get
+slower answers meanwhile. Run artifacts include corpus text and query logs, so
+they stay outside Git (`eval/reports/` is gitignored). Metric definitions,
+gates and how to read a run: [`EVALUATION.md`](EVALUATION.md).
