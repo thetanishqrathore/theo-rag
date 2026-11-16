@@ -12,11 +12,18 @@ export function SourceCarousel({ citations, onSelect }: SourceCarouselProps) {
   const railRef = useRef<HTMLDivElement>(null)
   const cardRefs = useRef<Array<HTMLButtonElement | null>>([])
   const [activeIndex, setActiveIndex] = useState(0)
-  const dragStateRef = useRef<{ active: boolean; startX: number; startScrollLeft: number; didDrag: boolean }>({
+  const dragStateRef = useRef<{
+    active: boolean
+    startX: number
+    startScrollLeft: number
+    didDrag: boolean
+    pointerId: number | null
+  }>({
     active: false,
     startX: 0,
     startScrollLeft: 0,
     didDrag: false,
+    pointerId: null,
   })
   const suppressClickUntilRef = useRef(0)
   const [dragging, setDragging] = useState(false)
@@ -66,16 +73,19 @@ export function SourceCarousel({ citations, onSelect }: SourceCarouselProps) {
     setActiveIndex(index)
   }
 
-  const endDrag = (pointerId?: number) => {
+  const endDrag = () => {
     const rail = railRef.current
     if (!rail || !dragStateRef.current.active) return
+    const pointerId = dragStateRef.current.pointerId
+    const didDrag = dragStateRef.current.didDrag
     dragStateRef.current.active = false
-    if (dragStateRef.current.didDrag) {
+    dragStateRef.current.pointerId = null
+    if (didDrag) {
       suppressClickUntilRef.current = Date.now() + 150
     }
     dragStateRef.current.didDrag = false
     setDragging(false)
-    if (pointerId != null && typeof rail.releasePointerCapture === 'function') {
+    if (didDrag && pointerId != null && typeof rail.releasePointerCapture === 'function') {
       try {
         rail.releasePointerCapture(pointerId)
       } catch {
@@ -91,14 +101,8 @@ export function SourceCarousel({ citations, onSelect }: SourceCarouselProps) {
     dragStateRef.current.startX = event.clientX
     dragStateRef.current.startScrollLeft = rail.scrollLeft
     dragStateRef.current.didDrag = false
+    dragStateRef.current.pointerId = event.pointerId
     setDragging(false)
-    if (typeof rail.setPointerCapture === 'function') {
-      try {
-        rail.setPointerCapture(event.pointerId)
-      } catch {
-        // Ignore environments that do not fully support pointer capture.
-      }
-    }
   }
 
   const onRailPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -108,6 +112,15 @@ export function SourceCarousel({ citations, onSelect }: SourceCarouselProps) {
     if (!dragStateRef.current.didDrag && Math.abs(deltaX) > 4) {
       dragStateRef.current.didDrag = true
       setDragging(true)
+      // Capture only once a drag starts: a captured pointer retargets the click
+      // to the rail, so capturing on pointerdown swallowed every card click.
+      if (typeof rail.setPointerCapture === 'function') {
+        try {
+          rail.setPointerCapture(event.pointerId)
+        } catch {
+          // Ignore environments that do not fully support pointer capture.
+        }
+      }
     }
     if (dragStateRef.current.didDrag) {
       rail.scrollLeft = dragStateRef.current.startScrollLeft - deltaX
@@ -138,9 +151,9 @@ export function SourceCarousel({ citations, onSelect }: SourceCarouselProps) {
         style={{ scrollbarWidth: 'thin', msOverflowStyle: 'none' }}
         onPointerDown={onRailPointerDown}
         onPointerMove={onRailPointerMove}
-        onPointerUp={(event) => endDrag(event.pointerId)}
-        onPointerCancel={(event) => endDrag(event.pointerId)}
-        onPointerLeave={() => endDrag()}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onPointerLeave={endDrag}
         onClickCapture={onRailClickCapture}
       >
         {citations.map((cit, idx) => {

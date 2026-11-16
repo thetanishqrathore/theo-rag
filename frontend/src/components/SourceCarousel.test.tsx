@@ -64,6 +64,37 @@ describe('SourceCarousel', () => {
     )
   })
 
+  it('opens a source on a plain mouse click without capturing the pointer', () => {
+    // A captured pointer makes the browser deliver the click to the rail, not the card.
+    const onSelect = vi.fn()
+    const { container } = render(<SourceCarousel citations={citations} onSelect={onSelect} />)
+
+    const rail = container.querySelector('.source-carousel-rail') as HTMLDivElement
+    const firstCard = container.querySelector('.source-carousel-card') as HTMLButtonElement
+    const setPointerCapture = vi.fn()
+    rail.setPointerCapture = setPointerCapture
+
+    fireEvent.pointerDown(firstCard, { pointerType: 'mouse', button: 0, clientX: 240, pointerId: 1 })
+    fireEvent.pointerUp(firstCard, { pointerType: 'mouse', button: 0, clientX: 240, pointerId: 1 })
+    fireEvent.click(firstCard)
+
+    expect(setPointerCapture).not.toHaveBeenCalled()
+    expect(onSelect).toHaveBeenCalledWith(citations[0], 0)
+  })
+
+  it('captures the pointer once a mouse drag starts', () => {
+    const { container } = render(<SourceCarousel citations={citations} />)
+
+    const rail = container.querySelector('.source-carousel-rail') as HTMLDivElement
+    const setPointerCapture = vi.fn()
+    rail.setPointerCapture = setPointerCapture
+
+    fireEvent.pointerDown(rail, { pointerType: 'mouse', button: 0, clientX: 240, pointerId: 1 })
+    expect(setPointerCapture).not.toHaveBeenCalled()
+    fireEvent.pointerMove(rail, { pointerType: 'mouse', button: 0, clientX: 210, pointerId: 1 })
+    expect(setPointerCapture).toHaveBeenCalledWith(1)
+  })
+
   it('does not trigger source selection on click immediately after mouse drag', () => {
     const onSelect = vi.fn()
     const { container } = render(<SourceCarousel citations={citations} onSelect={onSelect} />)
